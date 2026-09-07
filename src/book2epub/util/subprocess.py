@@ -3,7 +3,7 @@
 import logging
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +17,7 @@ _SECRET_PATTERNS = [
 ]
 
 
-def redact_command(cmd: list[str]) -> list[str]:
+def redact_command(cmd: Sequence[str]) -> list[str]:
     """Return a copy of the command arguments with sensitive values redacted."""
     redacted: list[str] = []
     for arg in cmd:
@@ -39,7 +39,7 @@ class SubprocessResult:
 
 
 def run_command(
-    cmd: list[str | Path],
+    cmd: Sequence[str | Path],
     *,
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,

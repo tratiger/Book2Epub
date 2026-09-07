@@ -46,8 +46,16 @@ python_version = "3.12"
 strict = true
 warn_unused_configs = true
 
+[[tool.mypy.overrides]]
+module = [
+    "img2pdf",
+    "pypdfium2",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src", "."]
 addopts = "--basetemp=.pytest_temp"
 markers = [
     "epubcheck: marks tests requiring EPUBCheck jar",
