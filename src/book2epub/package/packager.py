@@ -26,9 +26,11 @@ class EpubPackager:
         self,
         epubcheck_jar: Path | None = None,
         strict: bool = True,
+        reproducible: bool = False,
     ) -> None:
         self.epubcheck_jar = epubcheck_jar
         self.strict = strict
+        self.reproducible = reproducible
 
     def package(
         self,
@@ -133,6 +135,10 @@ class EpubPackager:
                 )
             )
 
+        mod_time = modified_utc
+        if self.reproducible and not mod_time:
+            mod_time = "1980-01-01T00:00:00Z"
+
         # 7. Generate and write OEBPS/package.opf
         opf_bytes = generate_package_opf(
             title=manifest_data.title,
@@ -142,7 +148,7 @@ class EpubPackager:
             spine_items=spine_items,
             authors=authors,
             publisher=publisher,
-            modified_utc=modified_utc,
+            modified_utc=mod_time,
         )
         opf_path = oebps_dest / "package.opf"
         opf_path.write_bytes(opf_bytes)
@@ -153,7 +159,11 @@ class EpubPackager:
         if candidate_epub.exists():
             candidate_epub.unlink()
 
-        create_epub_zip(staging_dir=epub_root, target_epub_path=candidate_epub)
+        create_epub_zip(
+            staging_dir=epub_root,
+            target_epub_path=candidate_epub,
+            reproducible=self.reproducible,
+        )
 
         # 9. Validate candidate with EPUBCheck 5.3.0 and internal checks
         json_report_path = validation_dir / "epubcheck.json"

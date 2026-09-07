@@ -365,5 +365,56 @@ def validate(
         raise typer.Exit(code=1)
 
 
+@app.command()
+def evaluate(
+    job_dir: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to job workspace directory containing qa/report.json.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+        ),
+    ],
+) -> None:
+    """Print structural preservation and semantic fidelity metrics for a conversion job."""
+    report_json = job_dir / "qa" / "report.json"
+    if not report_json.is_file():
+        error_console.print(f"[bold red]QA report not found at {report_json}[/bold red]")
+        raise typer.Exit(code=1)
+
+    import json
+
+    data = json.loads(report_json.read_text(encoding="utf-8"))
+    metrics = data.get("metrics", {})
+
+    table = Table(title=f"Structural Evaluation Metrics ({job_dir.name})", show_header=False)
+    table.add_column("Metric", style="bold cyan")
+    table.add_column("Value", style="white")
+
+    table.add_row("Block Coverage", f"{metrics.get('block_coverage', 0) * 100:.2f}%")
+    table.add_row("Math Semantic Rate", f"{metrics.get('math_semantic_rate', 0) * 100:.2f}%")
+    table.add_row("Table Semantic Rate", f"{metrics.get('table_semantic_rate', 0) * 100:.2f}%")
+    table.add_row("Code Text Rate", f"{metrics.get('code_text_rate', 0) * 100:.2f}%")
+    table.add_row(
+        "Caption Retention Rate",
+        f"{metrics.get('caption_retention_rate', 0) * 100:.2f}%",
+    )
+    table.add_row(
+        "Heading Level Known Rate",
+        f"{metrics.get('heading_level_known_rate', 0) * 100:.2f}%",
+    )
+    table.add_row("Unknown Block Count", str(metrics.get("unknown_block_count", 0)))
+    table.add_row(
+        "Unknown Blocks / 100 Pages",
+        f"{metrics.get('unknown_block_rate_per_100_pages', 0):.2f}",
+    )
+    table.add_row("EPUBCheck Errors", str(metrics.get("epubcheck_error_count", 0)))
+    table.add_row("EPUBCheck Warnings", str(metrics.get("epubcheck_warning_count", 0)))
+
+    console.print(table)
+
+
 if __name__ == "__main__":
     app()

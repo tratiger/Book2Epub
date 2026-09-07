@@ -11,7 +11,11 @@ logger = logging.getLogger(__name__)
 MIMETYPE_BYTES = b"application/epub+zip"
 
 
-def create_epub_zip(staging_dir: Path, target_epub_path: Path) -> Path:
+def create_epub_zip(
+    staging_dir: Path,
+    target_epub_path: Path,
+    reproducible: bool = False,
+) -> Path:
     """
     Package an unpacked EPUB staging directory into an EPUB 3.3 ZIP archive.
 
@@ -33,6 +37,7 @@ def create_epub_zip(staging_dir: Path, target_epub_path: Path) -> Path:
     # Ensure target parent directory exists
     target_epub_path.parent.mkdir(parents=True, exist_ok=True)
     temp_epub_path = target_epub_path.with_suffix(".epub.tmp")
+    fixed_time = (1980, 1, 1, 0, 0, 0)
 
     try:
         with zipfile.ZipFile(
@@ -50,6 +55,8 @@ def create_epub_zip(staging_dir: Path, target_epub_path: Path) -> Path:
             mimetype_info = zipfile.ZipInfo(filename="mimetype")
             mimetype_info.compress_type = zipfile.ZIP_STORED
             mimetype_info.flag_bits |= 0x800  # UTF-8 flag
+            if reproducible:
+                mimetype_info.date_time = fixed_time
             zf.writestr(mimetype_info, MIMETYPE_BYTES)
 
             # 2. Collect all other files in deterministic lexical path order
@@ -68,6 +75,8 @@ def create_epub_zip(staging_dir: Path, target_epub_path: Path) -> Path:
                 zinfo = zipfile.ZipInfo(filename=posix_name)
                 zinfo.compress_type = zipfile.ZIP_DEFLATED
                 zinfo.flag_bits |= 0x800  # UTF-8 flag
+                if reproducible:
+                    zinfo.date_time = fixed_time
                 zf.writestr(zinfo, file_path.read_bytes())
 
         # 4. Reopen and verify integrity

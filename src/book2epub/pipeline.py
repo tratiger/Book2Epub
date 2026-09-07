@@ -27,6 +27,7 @@ from book2epub.mineru.validate import (
 )
 from book2epub.package import EpubPackager, PackagingResult
 from book2epub.paths import JobPaths, create_job_paths, get_epubcheck_jar_path
+from book2epub.qa import QAReportData, generate_qa_report
 from book2epub.render import ReflowRenderer, RenderResult
 from book2epub.util.hashing import compute_mineru_cache_key
 
@@ -257,6 +258,42 @@ def run_conversion_m4(
     return res
 
 
+def run_conversion_m5(
+    paths: JobPaths,
+    raw_middle_path: Path,
+    book_ir: BookIR,
+    render_result: RenderResult,
+    packaging_result: PackagingResult,
+    cfg: JobConfig,
+    manifest_data: dict[str, Any] | None = None,
+) -> QAReportData:
+    """
+    Execute M5 (QA diagnostics, structural checks, and release reporting).
+
+    Writes:
+      qa/report.json
+      qa/report.html
+    """
+    logger.info("[Stage 6/6] Generating comprehensive QA report and reconciliation checks...")
+    with raw_middle_path.open("r", encoding="utf-8") as f:
+        raw_middle_data = json.load(f)
+
+    qa_data = generate_qa_report(
+        job_id=paths.job_id,
+        raw_middle_data=raw_middle_data,
+        book_ir=book_ir,
+        render_result=render_result,
+        packaging_result=packaging_result,
+        cfg=cfg,
+        report_json_path=paths.qa_report_json,
+        report_html_path=paths.qa_report_html,
+        manifest_data=manifest_data,
+    )
+    packaging_result.qa_report_path = paths.qa_report_html
+    logger.info("=== Milestone M5 Complete: QA report at %s ===", paths.qa_report_html)
+    return qa_data
+
+
 def run_pipeline(
     input_dir: Path,
     output_epub: Path,
@@ -275,6 +312,22 @@ def run_pipeline(
 
     # Execute M4
     packaging_result = run_conversion_m4(render_result, output_epub, paths, cfg)
+
+    # Execute M5
+    manifest_data = (
+        json.loads(paths.manifest_file.read_text(encoding="utf-8"))
+        if paths.manifest_file.is_file()
+        else None
+    )
+    run_conversion_m5(
+        paths=paths,
+        raw_middle_path=canonical_middle,
+        book_ir=normalized_ir,
+        render_result=render_result,
+        packaging_result=packaging_result,
+        cfg=cfg,
+        manifest_data=manifest_data,
+    )
 
     return packaging_result
 
@@ -303,5 +356,16 @@ def run_from_middle(
 
     # Execute M4
     packaging_result = run_conversion_m4(render_result, output_epub, paths, cfg)
+
+    # Execute M5
+    run_conversion_m5(
+        paths=paths,
+        raw_middle_path=canonical_middle,
+        book_ir=normalized_ir,
+        render_result=render_result,
+        packaging_result=packaging_result,
+        cfg=cfg,
+        manifest_data=None,
+    )
 
     return packaging_result
