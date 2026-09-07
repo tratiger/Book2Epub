@@ -57,7 +57,7 @@ def test_m1_end_to_end_with_mock_mineru(tmp_path: Path, monkeypatch: pytest.Monk
     with pytest.raises(NotImplementedStageError) as exc_info:
         run_pipeline(pages_dir, out_epub, cfg)
 
-    assert "Milestones M1 and M2 succeeded" in str(exc_info.value)
+    assert "Milestones M1, M2, and M3 succeeded" in str(exc_info.value)
     assert call_count == 1
 
     # Verify artifacts from first run

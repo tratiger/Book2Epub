@@ -27,6 +27,7 @@ from book2epub.mineru.validate import (
     verify_referenced_images_exist,
 )
 from book2epub.paths import JobPaths, create_job_paths
+from book2epub.render import ReflowRenderer, RenderResult
 from book2epub.util.hashing import compute_mineru_cache_key
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,41 @@ def run_conversion_m2(
     return raw_ir, normalized_ir
 
 
+def run_conversion_m3(
+    normalized_ir: BookIR,
+    paths: JobPaths,
+    cfg: JobConfig,
+) -> RenderResult:
+    """
+    Execute M3 (Reflow XHTML / MathML renderer) pipeline.
+
+    Writes unpacked publication tree to:
+      render/OEBPS/
+        text/*.xhtml
+        styles/book.css
+        images/*
+        render-manifest.json
+
+    Returns RenderResult.
+    """
+    logger.info("[Stage 4/6] Rendering BookIR to reflowable XHTML/MathML...")
+    renderer = ReflowRenderer(
+        output_dir=paths.render_dir,
+        cli_title=cfg.metadata.title,
+        cli_language=cfg.metadata.language,
+        cli_identifier=cfg.metadata.identifier,
+    )
+    result = renderer.render(normalized_ir)
+    logger.info(
+        "=== Milestone M3 Complete: %d XHTML parts, %d math, %d figures, %d tables ===",
+        result.xhtml_part_count,
+        result.math_count,
+        result.figure_count + result.chart_count,
+        result.table_count,
+    )
+    return result
+
+
 def run_pipeline(
     input_dir: Path,
     output_epub: Path,
@@ -201,10 +237,14 @@ def run_pipeline(
     # Execute M2
     _, normalized_ir = run_conversion_m2(canonical_middle, paths, cfg)
 
-    # In M2, M3 (Renderer) is not yet implemented
+    # Execute M3
+    render_result = run_conversion_m3(normalized_ir, paths, cfg)
+
+    # In M3, M4 (Packaging) is not yet implemented
     raise NotImplementedStageError(
-        f"Milestones M1 and M2 succeeded.\n"
-        f"Normalized BookIR ready with {len(normalized_ir.blocks)} blocks at: "
-        f"{paths.ir_normalized_json}\n"
-        "Milestone M3 (Reflow Renderer) is not yet implemented."
+        f"Milestones M1, M2, and M3 succeeded.\n"
+        f"Unpacked OEBPS tree ready with {render_result.xhtml_part_count} parts at: "
+        f"{render_result.oebps_dir}\n"
+        "Milestone M4 (EPUB Packaging and EPUBCheck) is not yet implemented."
     )
+

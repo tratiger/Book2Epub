@@ -66,6 +66,18 @@ class Asset(BaseModel):
         "figure", "chart", "table-fallback", "equation-fallback", "cover"
     ] = Field(description="Role of asset in publication")
 
+    @property
+    def id(self) -> str:
+        return self.asset_id
+
+    @property
+    def rel_path(self) -> str:
+        return f"images/{self.source_path.name}"
+
+    @property
+    def local_path(self) -> Path:
+        return self.source_path
+
 
 class InlineBase(BaseModel):
     """Base class for all inline nodes."""

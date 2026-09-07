@@ -79,3 +79,16 @@ class AssetRegistry:
         self.assets[asset_id] = asset
         self._hash_to_id[sha] = asset_id
         return asset_id
+
+    def register_existing(self, asset: Asset) -> None:
+        """Register an existing Asset object."""
+        self.assets[asset.asset_id] = asset
+        self._hash_to_id[asset.sha256] = asset.asset_id
+
+    def get_asset(self, asset_id: str) -> Asset | None:
+        """Retrieve an asset by ID."""
+        return self.assets.get(asset_id)
+
+    def list_assets(self) -> list[Asset]:
+        """List all registered assets in deterministic ID order."""
+        return [self.assets[k] for k in sorted(self.assets.keys())]
