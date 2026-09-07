@@ -45,10 +45,7 @@ def test_text_join_rules() -> None:
 
 def test_comprehensive_middle_json_conversion() -> None:
     fixture_path = (
-        Path(__file__).parent.parent
-        / "fixtures"
-        / "middle"
-        / "hybrid-3.4.5-comprehensive.json"
+        Path(__file__).parent.parent / "fixtures" / "middle" / "hybrid-3.4.5-comprehensive.json"
     )
     with fixture_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
@@ -125,8 +122,7 @@ def test_comprehensive_middle_json_conversion() -> None:
     merged_paras = [
         b
         for b in normalized_ir.blocks
-        if isinstance(b, Paragraph)
-        and any(isinstance(i, PageBoundary) for i in b.inlines)
+        if isinstance(b, Paragraph) and any(isinstance(i, PageBoundary) for i in b.inlines)
     ]
     assert len(merged_paras) == 1
     merged_p = merged_paras[0]
@@ -144,10 +140,7 @@ def test_comprehensive_middle_json_conversion() -> None:
 
 def test_bookir_roundtrip_serialization(tmp_path: Path) -> None:
     fixture_path = (
-        Path(__file__).parent.parent
-        / "fixtures"
-        / "middle"
-        / "hybrid-3.4.5-comprehensive.json"
+        Path(__file__).parent.parent / "fixtures" / "middle" / "hybrid-3.4.5-comprehensive.json"
     )
     with fixture_path.open("r", encoding="utf-8") as f:
         data = json.load(f)

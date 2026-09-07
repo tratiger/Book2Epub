@@ -20,13 +20,11 @@ def sample_middle_dict(
                     {
                         "type": "title",
                         "level": 1,
-                        "lines": [{"spans": [{"type": "text", "content": f"Title {i+1}"}]}],
+                        "lines": [{"spans": [{"type": "text", "content": f"Title {i + 1}"}]}],
                     },
                     {
                         "type": "text",
-                        "lines": [
-                            {"spans": [{"type": "text", "content": "Paragraph content."}]}
-                        ],
+                        "lines": [{"spans": [{"type": "text", "content": "Paragraph content."}]}],
                     },
                 ],
                 "discarded_blocks": [

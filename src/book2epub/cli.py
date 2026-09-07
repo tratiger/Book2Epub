@@ -4,13 +4,16 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.table import Table
 
 from book2epub.config import AppConfig, JobConfig, MetadataConfig, MinerUConfig, RenderConfig
 from book2epub.doctor import print_doctor_report, run_doctor_checks
-from book2epub.errors import NotImplementedStageError
 from book2epub.logging import configure_logging, console, error_console
 from book2epub.mineru.inspect import print_inspect_report
-from book2epub.pipeline import run_pipeline
+from book2epub.package.models import PackagingResult
+from book2epub.package.validator import run_epubcheck
+from book2epub.paths import get_epubcheck_jar_path
+from book2epub.pipeline import run_from_middle, run_pipeline
 from book2epub.version import __version__
 
 app = typer.Typer(
@@ -165,12 +168,42 @@ def convert(
         metadata=meta_cfg,
     )
 
-    run_pipeline(
+    result = run_pipeline(
         input_dir=input_dir,
         output_epub=output,
         cfg=job_cfg,
         force_mineru=force_mineru,
     )
+    print_conversion_summary(result)
+
+
+def print_conversion_summary(result: PackagingResult) -> None:
+    """Print standard conversion completion summary to console."""
+    console.print()
+    console.print("[bold green]Conversion completed successfully![/bold green]")
+
+    table = Table(title="Book2Epub Conversion Summary", show_header=False)
+    table.add_column("Metric", style="bold cyan")
+    table.add_column("Value", style="white")
+
+    table.add_row("Output Path", str(result.epub_path))
+    table.add_row(
+        "EPUB File Size",
+        f"{result.file_size_bytes:,} bytes ({result.file_size_bytes / (1024 * 1024):.2f} MB)",
+    )
+    table.add_row("Source Page Count", str(result.source_page_count))
+    table.add_row("XHTML Part Count", str(result.xhtml_part_count))
+    table.add_row("Figure Count", str(result.figure_count))
+    table.add_row("Chart Count", str(result.chart_count))
+    table.add_row("Table Count", str(result.table_count))
+    table.add_row("Code Blocks", str(result.code_count))
+    table.add_row("Math Formulas", str(result.math_count))
+    table.add_row("Fallbacks Used", str(result.fallback_count))
+    table.add_row("Warnings Count", str(result.warning_count))
+    table.add_row("EPUBCheck Result", "[bold green]EPUBCheck PASS[/bold green]")
+    table.add_row("QA Report Path", str(result.qa_report_path or "N/A"))
+
+    console.print(table)
 
 
 @app.command()
@@ -228,11 +261,31 @@ def from_middle(
     ] = False,
 ) -> None:
     """Render EPUB directly from an existing MinerU middle.json without running OCR."""
-    configure_logging(level="DEBUG" if verbose else "INFO")
-    error_console.print(
-        "[bold yellow]from-middle command is not yet implemented in M1.[/bold yellow]"
+    app_cfg = AppConfig(
+        work_dir=work_dir,
+        strict=strict,
+        logging_level="DEBUG" if verbose else "INFO",
     )
-    raise NotImplementedStageError("Milestone M1 does not implement from-middle yet.")
+    meta_cfg = MetadataConfig(
+        title=title,
+        authors=author or [],
+        language=language,
+        identifier=identifier,
+        publisher=publisher,
+        cover_image=cover_image,
+    )
+    job_cfg = JobConfig(
+        app=app_cfg,
+        render=RenderConfig(language=language),
+        metadata=meta_cfg,
+    )
+
+    result = run_from_middle(
+        middle_json=middle_json,
+        output_epub=output,
+        cfg=job_cfg,
+    )
+    print_conversion_summary(result)
 
 
 @app.command()
@@ -271,12 +324,45 @@ def validate(
             help="Path to .tools directory where epubcheck is installed.",
         ),
     ] = None,
+    strict: Annotated[
+        bool,
+        typer.Option("--strict/--no-strict", help="Fail on warnings."),
+    ] = True,
 ) -> None:
     """Validate an EPUB file using internal checks and EPUBCheck 5.3.0."""
-    error_console.print(
-        "[bold yellow]validate command is not yet implemented in M1.[/bold yellow]"
-    )
-    raise NotImplementedStageError("Milestone M1 does not implement validate yet.")
+    jar_path = get_epubcheck_jar_path(tools_dir)
+    console.print(f"[bold]Validating EPUB:[/] {epub_file}")
+    report = run_epubcheck(epub_file, epubcheck_jar=jar_path, fail_on_warnings=strict)
+
+    table = Table(title="Validation Summary", show_header=False)
+    table.add_column("Property", style="bold cyan")
+    table.add_column("Value", style="white")
+
+    table.add_row("EPUB File", str(epub_file))
+    table.add_row("EPUBCheck Exit Code", str(report.epubcheck_exit_code))
+    table.add_row("Fatal Issues", str(report.fatal_count))
+    table.add_row("Errors", str(report.error_count))
+    table.add_row("Warnings", str(report.warning_count))
+    table.add_row("Info Notices", str(report.info_count))
+
+    if report.is_valid:
+        table.add_row("Overall Status", "[bold green]PASS[/bold green]")
+        console.print(table)
+        raise typer.Exit(code=0)
+    else:
+        table.add_row("Overall Status", "[bold red]FAIL[/bold red]")
+        console.print(table)
+        error_console.print()
+        error_console.print("[bold red]Validation Issues:[/bold red]")
+        for issue in report.issues:
+            loc_str = f" ({issue.location})" if issue.location else ""
+            if issue.severity in ("FATAL", "ERROR"):
+                error_console.print(f"  [red][{issue.severity}][/red] {issue.message}{loc_str}")
+            elif issue.severity == "WARNING":
+                error_console.print(
+                    f"  [yellow][{issue.severity}][/yellow] {issue.message}{loc_str}"
+                )
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

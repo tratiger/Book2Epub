@@ -48,9 +48,7 @@ def configure_logging(
         log_file.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(numeric_level)
-        file_formatter = UtcIsoFormatter(
-            fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
-        )
+        file_formatter = UtcIsoFormatter(fmt="%(asctime)s [%(levelname)s] [%(name)s] %(message)s")
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)
 

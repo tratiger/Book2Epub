@@ -12,16 +12,37 @@ from book2epub.ir.assets import AssetRegistry
 logger = logging.getLogger(__name__)
 
 ALLOWED_TAGS = {
-    "table", "thead", "tbody", "tfoot", "tr", "th", "td",
-    "caption", "colgroup", "col", "p", "span", "br",
-    "img", "sup", "sub", "em", "strong", "b", "i",
+    "table",
+    "thead",
+    "tbody",
+    "tfoot",
+    "tr",
+    "th",
+    "td",
+    "caption",
+    "colgroup",
+    "col",
+    "p",
+    "span",
+    "br",
+    "img",
+    "sup",
+    "sub",
+    "em",
+    "strong",
+    "b",
+    "i",
 }
 
 CELL_ATTRIBUTES = {"rowspan", "colspan", "scope", "headers"}
 IMG_ATTRIBUTES = {"src", "alt"}
 ALLOWED_CLASSES = {
-    "align-left", "align-center", "align-right",
-    "table-cell", "math-inline", "math-display",
+    "align-left",
+    "align-center",
+    "align-right",
+    "table-cell",
+    "math-inline",
+    "math-display",
 }
 
 

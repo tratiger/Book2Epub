@@ -94,17 +94,19 @@ def print_inspect_report(middle_json_path: Path) -> None:
     metrics = analyze_middle_json(middle_json_path)
 
     title = f"MinerU Middle JSON Inspection: {middle_json_path.name}"
-    console.print(Panel.fit(
-        f"[bold cyan]MinerU Version:[/bold cyan] {metrics['version_name']}\n"
-        f"[bold cyan]Backend:[/bold cyan] {metrics['backend']}   "
-        f"[bold cyan]Effort:[/bold cyan] {metrics['effort']}\n"
-        f"[bold cyan]Total Pages:[/bold cyan] {metrics['page_count']}\n"
-        f"[bold cyan]Referenced Images:[/bold cyan] {metrics['total_referenced_images']} "
-        f"(Missing: {metrics['missing_images_count']})\n"
-        f"[bold cyan]Titles With Level:[/bold cyan] {metrics['titles_with_level']}  |  "
-        f"[bold cyan]Without Level:[/bold cyan] {metrics['titles_without_level']}",
-        title=title,
-    ))
+    console.print(
+        Panel.fit(
+            f"[bold cyan]MinerU Version:[/bold cyan] {metrics['version_name']}\n"
+            f"[bold cyan]Backend:[/bold cyan] {metrics['backend']}   "
+            f"[bold cyan]Effort:[/bold cyan] {metrics['effort']}\n"
+            f"[bold cyan]Total Pages:[/bold cyan] {metrics['page_count']}\n"
+            f"[bold cyan]Referenced Images:[/bold cyan] {metrics['total_referenced_images']} "
+            f"(Missing: {metrics['missing_images_count']})\n"
+            f"[bold cyan]Titles With Level:[/bold cyan] {metrics['titles_with_level']}  |  "
+            f"[bold cyan]Without Level:[/bold cyan] {metrics['titles_without_level']}",
+            title=title,
+        )
+    )
 
     # Tables
     p_table = Table(title="Page Size Distribution", show_header=True)

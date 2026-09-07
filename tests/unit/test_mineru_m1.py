@@ -83,9 +83,7 @@ def test_canonicalize_and_referenced_images(tmp_path: Path) -> None:
             "blocks": [
                 {
                     "type": "image_body",
-                    "lines": [
-                        {"spans": [{"type": "image", "image_path": "images/fig1.png"}]}
-                    ],
+                    "lines": [{"spans": [{"type": "image", "image_path": "images/fig1.png"}]}],
                 }
             ],
         }

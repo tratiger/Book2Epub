@@ -35,7 +35,7 @@ def extract_plain_text_from_inline(inline: Inline) -> str:
         return inline.text
     elif isinstance(inline, InlineMath):
         return inline.latex
-    elif isinstance(inline, (PageBoundary, )):
+    elif isinstance(inline, (PageBoundary,)):
         return ""
     return ""
 

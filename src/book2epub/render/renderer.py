@@ -246,12 +246,9 @@ class ReflowRenderer:
             toc=hierarchical_toc,
             documents=rendered_docs,
             assets=asset_manifest_entries,
-            styles=[
-                {"id": "book-css", "href": "styles/book.css", "media_type": "text/css"}
-            ],
+            styles=[{"id": "book-css", "href": "styles/book.css", "media_type": "text/css"}],
             warnings=[
-                {"code": w.code, "message": w.message, "page_idx": w.page_idx}
-                for w in all_warnings
+                {"code": w.code, "message": w.message, "page_idx": w.page_idx} for w in all_warnings
             ],
         )
 

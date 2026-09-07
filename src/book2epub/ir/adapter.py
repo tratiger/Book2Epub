@@ -37,8 +37,17 @@ from book2epub.ir.text_join import join_prose_texts
 logger = logging.getLogger(__name__)
 
 KNOWN_BLOCK_KEYS = {
-    "type", "lines", "blocks", "bbox", "level", "sub_type",
-    "attribute", "html", "image_path", "content", "language",
+    "type",
+    "lines",
+    "blocks",
+    "bbox",
+    "level",
+    "sub_type",
+    "attribute",
+    "html",
+    "image_path",
+    "content",
+    "language",
 }
 
 
@@ -245,7 +254,7 @@ class MiddleJsonAdapter:
                         local_path = self.base_dir / img_rel_path
                         role: Literal[
                             "figure", "chart", "table-fallback", "equation-fallback", "cover"
-                        ] = ("chart" if b_type == "chart" else "figure")
+                        ] = "chart" if b_type == "chart" else "figure"
                         try:
                             asset_id = self.registry.register_asset(local_path, role=role)
                         except Exception as e:
@@ -474,8 +483,7 @@ class MiddleJsonAdapter:
                         IRWarning(
                             code="UNKNOWN_BLOCK_TYPE",
                             message=(
-                                f"Encountered unknown block type '{b_type}' "
-                                f"on page {page_idx + 1}"
+                                f"Encountered unknown block type '{b_type}' on page {page_idx + 1}"
                             ),
                             page_idx=page_idx,
                             details={"type": b_type, "text": text_extracted[:100]},

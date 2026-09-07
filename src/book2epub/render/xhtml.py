@@ -72,6 +72,23 @@ def ensure_xhtml_namespace(element: etree._Element) -> None:
     tag_str = str(element.tag)
     if not tag_str.startswith("{"):
         element.tag = f"{{{NS_XHTML}}}{tag_str}"
+
+    # If element is img or has src attribute, ensure relative path is relative to OEBPS/text/
+    src = element.get("src")
+    if src:
+        if src.startswith("images/"):
+            element.set("src", f"../{src}")
+        elif (
+            not src.startswith("../")
+            and not src.startswith("http://")
+            and not src.startswith("https://")
+        ):
+            element.set("src", f"../images/{src}")
+
+    # Ensure alt attribute on img elements for HTML5/EPUB compliance
+    if (tag_str == "img" or tag_str.endswith("}img")) and "alt" not in element.attrib:
+        element.set("alt", "")
+
     for child in element:
         # Do not override MathML namespace
         child_tag = str(child.tag)
@@ -331,8 +348,7 @@ class DocumentRenderer:
                         IRWarning(
                             code="MATH_UNCONVERTED",
                             message=(
-                                "Display LaTeX could not be converted: "
-                                f"{res.fallback_latex[:40]}"
+                                f"Display LaTeX could not be converted: {res.fallback_latex[:40]}"
                             ),
                             page_idx=block.sources[0].page_idx if block.sources else None,
                         )
@@ -389,9 +405,7 @@ class DocumentRenderer:
             img_src = f"../{asset.rel_path}" if asset else f"../images/{block.asset_id}"
 
             # Alt text: descriptive caption or empty
-            caption_text = "".join(
-                i.text for i in block.caption if isinstance(i, Text)
-            ).strip()
+            caption_text = "".join(i.text for i in block.caption if isinstance(i, Text)).strip()
             alt_text = caption_text if caption_text else ""
             if not alt_text:
                 self.warnings.append(

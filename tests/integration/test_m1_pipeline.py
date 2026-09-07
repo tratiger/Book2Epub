@@ -7,7 +7,6 @@ import pytest
 from PIL import Image
 
 from book2epub.config import JobConfig
-from book2epub.errors import NotImplementedStageError
 from book2epub.pipeline import run_pipeline
 from tests.fixtures.synthetic_middle import sample_middle_dict
 
@@ -23,7 +22,9 @@ def test_m1_end_to_end_with_mock_mineru(tmp_path: Path, monkeypatch: pytest.Monk
     pages_dir = tmp_path / "pages"
     for i in range(1, 11):
         # Give each a distinct color/content
-        create_page_image(pages_dir / f"page{i}.jpg", color=f"#{i*20:02x}{i*20:02x}{i*20:02x}")
+        create_page_image(
+            pages_dir / f"page{i}.jpg", color=f"#{i * 20:02x}{i * 20:02x}{i * 20:02x}"
+        )
 
     work_dir = tmp_path / "work"
     out_epub = tmp_path / "out.epub"
@@ -53,11 +54,11 @@ def test_m1_end_to_end_with_mock_mineru(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr("book2epub.pipeline.execute_mineru", mock_execute_mineru)
 
-    # First run: should execute mock MinerU and reach end of M2 (NotImplementedStageError for M3)
-    with pytest.raises(NotImplementedStageError) as exc_info:
-        run_pipeline(pages_dir, out_epub, cfg)
-
-    assert "Milestones M1, M2, and M3 succeeded" in str(exc_info.value)
+    # First run: should execute mock MinerU and successfully complete EPUB packaging and validation
+    result = run_pipeline(pages_dir, out_epub, cfg)
+    assert result.epub_path.is_file()
+    assert result.validation_report.is_valid
+    assert out_epub.is_file()
     assert call_count == 1
 
     # Verify artifacts from first run
@@ -90,6 +91,7 @@ def test_m1_end_to_end_with_mock_mineru(tmp_path: Path, monkeypatch: pytest.Monk
     # Second run with same input and same job dir (or same work_dir with existing paths):
     # Pass job paths to verify caching
     from book2epub.paths import JobPaths
+
     existing_paths = JobPaths(job_id=job_dir.name, root=job_dir)
     from book2epub.pipeline import run_conversion_m1
 

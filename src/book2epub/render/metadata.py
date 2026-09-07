@@ -110,9 +110,7 @@ def infer_metadata(
         first_h1: str | None = None
         for block in bookir.blocks:
             if isinstance(block, Heading) and block.level == 1:
-                heading_text = "".join(
-                    i.text for i in block.inlines if isinstance(i, Text)
-                ).strip()
+                heading_text = "".join(i.text for i in block.inlines if isinstance(i, Text)).strip()
                 if heading_text:
                     first_h1 = heading_text
                     break

@@ -62,9 +62,9 @@ class Asset(BaseModel):
     byte_size: int = Field(description="Size in bytes")
     width: int | None = None
     height: int | None = None
-    role: Literal[
-        "figure", "chart", "table-fallback", "equation-fallback", "cover"
-    ] = Field(description="Role of asset in publication")
+    role: Literal["figure", "chart", "table-fallback", "equation-fallback", "cover"] = Field(
+        description="Role of asset in publication"
+    )
 
     @property
     def id(self) -> str:

@@ -28,10 +28,7 @@ from book2epub.render.splitter import (
 from book2epub.render.xhtml import NS_XHTML
 
 FIXTURE_PATH = (
-    Path(__file__).parent.parent
-    / "fixtures"
-    / "middle"
-    / "hybrid-3.4.5-comprehensive.json"
+    Path(__file__).parent.parent / "fixtures" / "middle" / "hybrid-3.4.5-comprehensive.json"
 )
 
 

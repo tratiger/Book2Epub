@@ -169,9 +169,7 @@ def check_torch_cuda_version() -> CheckResult:
 
 
 def check_lmdeploy_blackwell(gpu_name: str) -> CheckResult:
-    is_blackwell = any(
-        kw in gpu_name for kw in ("5070", "5080", "5090", "Blackwell", "50-Series")
-    )
+    is_blackwell = any(kw in gpu_name for kw in ("5070", "5080", "5090", "Blackwell", "50-Series"))
     code = "import lmdeploy; print(getattr(lmdeploy, '__version__', 'available'))"
     res = run_command([sys.executable, "-c", code])
     if res.exit_code == 0:

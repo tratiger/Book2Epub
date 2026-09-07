@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from book2epub.config import JobConfig
-from book2epub.errors import NotImplementedStageError
 from book2epub.ingest.pdf import create_source_pdf
 from book2epub.ingest.scanner import scan_and_validate_directory
 from book2epub.ir.adapter import MiddleJsonAdapter
@@ -26,7 +25,8 @@ from book2epub.mineru.validate import (
     validate_middle_json_root,
     verify_referenced_images_exist,
 )
-from book2epub.paths import JobPaths, create_job_paths
+from book2epub.package import EpubPackager, PackagingResult
+from book2epub.paths import JobPaths, create_job_paths, get_epubcheck_jar_path
 from book2epub.render import ReflowRenderer, RenderResult
 from book2epub.util.hashing import compute_mineru_cache_key
 
@@ -72,9 +72,8 @@ def run_conversion_m1(
     )
 
     canonical_middle = paths.mineru_canonical_middle_json
-    can_skip = (
-        not force_mineru
-        and is_mineru_cache_valid(paths.mineru_stage_file, cache_key, canonical_middle)
+    can_skip = not force_mineru and is_mineru_cache_valid(
+        paths.mineru_stage_file, cache_key, canonical_middle
     )
 
     if can_skip:
@@ -224,13 +223,47 @@ def run_conversion_m3(
     return result
 
 
+def run_conversion_m4(
+    render_result: RenderResult,
+    output_epub: Path,
+    paths: JobPaths,
+    cfg: JobConfig,
+) -> PackagingResult:
+    """
+    Execute M4 (Native EPUB 3.3 packaging and EPUBCheck validation) pipeline.
+
+    Packages OEBPS tree into output_epub and validates with EPUBCheck.
+    Returns PackagingResult.
+    """
+    logger.info("[Stage 5/6] Packaging reflowable EPUB 3.3 and validating with EPUBCheck...")
+    packager = EpubPackager(
+        epubcheck_jar=get_epubcheck_jar_path(),
+        strict=cfg.app.strict,
+    )
+    res = packager.package(
+        render_result=render_result,
+        output_epub=output_epub,
+        staging_dir=paths.render_dir,
+        validation_dir=paths.validation_dir,
+        authors=cfg.metadata.authors,
+        publisher=cfg.metadata.publisher,
+        qa_report_path=paths.qa_report_html,
+    )
+    logger.info(
+        "=== Milestone M4 Complete: %s (%.2f MB, EPUBCheck PASS) ===",
+        output_epub,
+        res.file_size_bytes / (1024 * 1024),
+    )
+    return res
+
+
 def run_pipeline(
     input_dir: Path,
     output_epub: Path,
     cfg: JobConfig,
     force_mineru: bool = False,
-) -> None:
-    """Run conversion pipeline through the latest implemented milestone."""
+) -> PackagingResult:
+    """Run full conversion pipeline from input page image directory to validated EPUB."""
     # Execute through M1
     paths, canonical_middle = run_conversion_m1(input_dir, cfg, force_mineru=force_mineru)
 
@@ -240,11 +273,35 @@ def run_pipeline(
     # Execute M3
     render_result = run_conversion_m3(normalized_ir, paths, cfg)
 
-    # In M3, M4 (Packaging) is not yet implemented
-    raise NotImplementedStageError(
-        f"Milestones M1, M2, and M3 succeeded.\n"
-        f"Unpacked OEBPS tree ready with {render_result.xhtml_part_count} parts at: "
-        f"{render_result.oebps_dir}\n"
-        "Milestone M4 (EPUB Packaging and EPUBCheck) is not yet implemented."
+    # Execute M4
+    packaging_result = run_conversion_m4(render_result, output_epub, paths, cfg)
+
+    return packaging_result
+
+
+def run_from_middle(
+    middle_json: Path,
+    output_epub: Path,
+    cfg: JobConfig,
+) -> PackagingResult:
+    """Run conversion pipeline directly from an existing MinerU middle.json."""
+    paths = create_job_paths(cfg.app.work_dir)
+    configure_logging(level=cfg.app.logging_level, log_file=paths.log_file)
+    logger.info("=== Starting Book2Epub (from-middle) Job: %s ===", paths.job_id)
+
+    # Copy / canonicalize middle.json and adjacent images to canonical area
+    canonical_middle, _ = canonicalize_mineru_output(
+        middle_json,
+        paths.mineru_canonical_dir,
     )
 
+    # Execute M2
+    _, normalized_ir = run_conversion_m2(canonical_middle, paths, cfg)
+
+    # Execute M3
+    render_result = run_conversion_m3(normalized_ir, paths, cfg)
+
+    # Execute M4
+    packaging_result = run_conversion_m4(render_result, output_epub, paths, cfg)
+
+    return packaging_result
