@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "book2epub"
+version = "0.1.0"
+description = "Reflowable EPUB 3.3 generator from technical book page images using MinerU middle.json"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.11,<3",
+    "typer>=0.16,<1",
+    "rich>=14,<15",
+    "img2pdf==0.6.3",
+    "latex2mathml==3.81.0",
+    "lxml>=5,<7",
+    "pillow>=10.0.0",
+]
+
+[project.scripts]
+book2epub = "book2epub.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",
+    "pytest-cov>=6,<8",
+    "ruff>=0.12,<1",
+    "mypy>=1.16,<2",
+    "types-lxml",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/book2epub"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--basetemp=.pytest_temp"
+markers = [
+    "epubcheck: marks tests requiring EPUBCheck jar",
+    "gpu: marks tests requiring NVIDIA GPU",
+]
