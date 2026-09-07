@@ -3,11 +3,16 @@
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from book2epub.config import JobConfig
 from book2epub.errors import NotImplementedStageError
 from book2epub.ingest.pdf import create_source_pdf
 from book2epub.ingest.scanner import scan_and_validate_directory
+from book2epub.ir.adapter import MiddleJsonAdapter
+from book2epub.ir.models import BookIR, BookMetadata
+from book2epub.ir.normalize import normalize_bookir
+from book2epub.ir.serializer import save_bookir
 from book2epub.logging import configure_logging
 from book2epub.mineru.cache import (
     is_mineru_cache_valid,
@@ -124,6 +129,65 @@ def run_conversion_m1(
     return paths, canonical_middle
 
 
+def run_conversion_m2(
+    canonical_middle_json: Path,
+    paths: JobPaths,
+    cfg: JobConfig,
+) -> tuple[BookIR, BookIR]:
+    """
+    Execute M2 (Middle.json to normalized BookIR) pipeline.
+
+    Writes:
+      ir/bookir.raw.json
+      ir/bookir.normalized.json
+
+    Returns (raw_ir, normalized_ir).
+    """
+    logger.info("[Stage 3/6] Converting middle.json to BookIR...")
+
+    with canonical_middle_json.open("r", encoding="utf-8") as f:
+        data: dict[str, Any] = json.load(f)
+
+    # Extract raw page numbers from discarded_blocks
+    raw_page_number_texts: list[str | None] = []
+    for page in data.get("pdf_info", []):
+        pn_texts: list[str] = []
+        for db in page.get("discarded_blocks", []):
+            if db.get("type") == "page_number":
+                for line in db.get("lines", []):
+                    for span in line.get("spans", []):
+                        if span.get("content"):
+                            pn_texts.append(span["content"])
+        raw_page_number_texts.append(" ".join(pn_texts) if pn_texts else None)
+
+    metadata = BookMetadata(
+        title=cfg.metadata.title,
+        authors=cfg.metadata.authors,
+        language=cfg.metadata.language,
+        identifier=cfg.metadata.identifier,
+        publisher=cfg.metadata.publisher,
+    )
+
+    adapter = MiddleJsonAdapter(
+        base_dir=canonical_middle_json.parent,
+        metadata=metadata,
+        strict=cfg.app.strict,
+    )
+    raw_ir = adapter.convert_middle_json(data)
+    save_bookir(raw_ir, paths.ir_raw_json)
+
+    logger.info("Applying normalization (cross-page joins, page labels, layout hints)...")
+    normalized_ir = normalize_bookir(raw_ir, raw_page_number_texts=raw_page_number_texts)
+    save_bookir(normalized_ir, paths.ir_normalized_json)
+
+    logger.info(
+        "=== Milestone M2 Complete: BookIR normalized with %d blocks, %d assets ===",
+        len(normalized_ir.blocks),
+        len(normalized_ir.assets),
+    )
+    return raw_ir, normalized_ir
+
+
 def run_pipeline(
     input_dir: Path,
     output_epub: Path,
@@ -134,9 +198,13 @@ def run_pipeline(
     # Execute through M1
     paths, canonical_middle = run_conversion_m1(input_dir, cfg, force_mineru=force_mineru)
 
-    # In M1, next stages are not yet implemented
+    # Execute M2
+    _, normalized_ir = run_conversion_m2(canonical_middle, paths, cfg)
+
+    # In M2, M3 (Renderer) is not yet implemented
     raise NotImplementedStageError(
-        f"Milestone M1 (Ingest and MinerU) succeeded.\n"
-        f"Canonical middle JSON ready at: {canonical_middle}\n"
-        "Milestone M2 (BookIR) is not yet implemented."
+        f"Milestones M1 and M2 succeeded.\n"
+        f"Normalized BookIR ready with {len(normalized_ir.blocks)} blocks at: "
+        f"{paths.ir_normalized_json}\n"
+        "Milestone M3 (Reflow Renderer) is not yet implemented."
     )

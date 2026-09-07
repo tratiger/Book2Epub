@@ -1,0 +1,330 @@
+{
+  "_version_name": "3.4.5",
+  "_backend": "hybrid",
+  "_effort": "high",
+  "_ocr_enable": true,
+  "_custom_debug_info": "harmless metadata field",
+  "pdf_info": [
+    {
+      "page_idx": 0,
+      "page_size": [800, 1200],
+      "para_blocks": [
+        {
+          "type": "title",
+          "level": 1,
+          "bbox": [50, 50, 500, 100],
+          "lines": [
+            {
+              "bbox": [50, 50, 500, 100],
+              "spans": [{"type": "text", "content": "Chapter 1 Introduction"}]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "bbox": [50, 120, 750, 180],
+          "lines": [
+            {
+              "bbox": [50, 120, 750, 150],
+              "spans": [{"type": "text", "content": "本書は技術書のEPUB変換パイプラインです。"}]
+            },
+            {
+              "bbox": [50, 150, 750, 180],
+              "spans": [
+                {"type": "text", "content": "This is an inter-"},
+                {"type": "text", "content": "esting observation with inline "},
+                {"type": "inline_equation", "content": "$E = mc^2$"},
+                {"type": "text", "content": " included."}
+              ]
+            }
+          ]
+        },
+        {
+          "type": "interline_equation",
+          "bbox": [50, 200, 750, 260],
+          "lines": [
+            {
+              "bbox": [50, 200, 750, 260],
+              "spans": [
+                {
+                  "type": "interline_equation",
+                  "content": "$$\\int_0^\\infty e^{-x}\\,dx = 1$$",
+                  "image_path": "images/eq_fb.png"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "bbox": [50, 280, 750, 350],
+          "lines": [
+            {
+              "bbox": [50, 280, 750, 350],
+              "spans": [
+                {
+                  "type": "text",
+                  "content": "This sentence begins on the first page and continues smoothly"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "discarded_blocks": [
+        {
+          "type": "header",
+          "bbox": [50, 20, 750, 40],
+          "lines": [{"spans": [{"type": "text", "content": "Introductory Notes"}]}]
+        },
+        {
+          "type": "footer",
+          "bbox": [50, 1160, 750, 1180],
+          "lines": [{"spans": [{"type": "text", "content": "Confidential"}]}]
+        },
+        {
+          "type": "page_number",
+          "bbox": [400, 1140, 450, 1160],
+          "lines": [{"spans": [{"type": "text", "content": "iii"}]}]
+        },
+        {
+          "type": "aside_text",
+          "bbox": [650, 160, 780, 220],
+          "lines": [{"spans": [{"type": "text", "content": "Important note in the margin"}]}]
+        }
+      ]
+    },
+    {
+      "page_idx": 1,
+      "page_size": [800, 1200],
+      "para_blocks": [
+        {
+          "type": "text",
+          "bbox": [50, 50, 750, 120],
+          "lines": [
+            {
+              "bbox": [50, 50, 750, 120],
+              "spans": [
+                {
+                  "type": "text",
+                  "content": "onto the second page without interruption."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "title",
+          "level": 2,
+          "bbox": [50, 130, 400, 170],
+          "lines": [
+            {
+              "bbox": [50, 130, 400, 170],
+              "spans": [{"type": "text", "content": "1.1 Code and Formulas"}]
+            }
+          ]
+        },
+        {
+          "type": "text",
+          "bbox": [50, 180, 750, 220],
+          "lines": [
+            {
+              "bbox": [50, 180, 750, 220],
+              "spans": [
+                {
+                  "type": "text",
+                  "content": "HTML tags use <script> & </script> symbols safely."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "sub_type": "code",
+          "language": "python",
+          "bbox": [50, 230, 750, 350],
+          "blocks": [
+            {
+              "type": "code_caption",
+              "lines": [
+                {"spans": [{"type": "text", "content": "Listing 1.1: Double function"}]}
+              ]
+            },
+            {
+              "type": "code_body",
+              "lines": [
+                {"spans": [{"type": "text", "content": "def compute(x):"}]},
+                {"spans": [{"type": "text", "content": "    return x * 2"}]}
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code",
+          "sub_type": "algorithm",
+          "bbox": [50, 360, 750, 440],
+          "blocks": [
+            {
+              "type": "code_body",
+              "lines": [
+                {"spans": [{"type": "text", "content": "Algorithm 1: Binary Search"}]},
+                {"spans": [{"type": "text", "content": "Step 1: Set low and high"}]}
+              ]
+            }
+          ]
+        },
+        {
+          "type": "image",
+          "bbox": [50, 450, 550, 650],
+          "blocks": [
+            {
+              "type": "image_body",
+              "lines": [
+                {
+                  "spans": [
+                    {
+                      "type": "image",
+                      "image_path": "images/fig1.png"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "image_caption",
+              "lines": [
+                {"spans": [{"type": "text", "content": "Figure 1.1: System diagram"}]}
+              ]
+            },
+            {
+              "type": "image_footnote",
+              "lines": [
+                {"spans": [{"type": "text", "content": "Source: 2026 data."}]}
+              ]
+            }
+          ]
+        },
+        {
+          "type": "chart",
+          "bbox": [50, 660, 450, 800],
+          "blocks": [
+            {
+              "type": "chart_body",
+              "lines": [
+                {
+                  "spans": [
+                    {
+                      "type": "chart",
+                      "image_path": "images/chart1.png",
+                      "content": "Chart showing 98% accuracy"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "chart_caption",
+              "lines": [
+                {"spans": [{"type": "text", "content": "Chart 1.1: Accuracy comparison"}]}
+              ]
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "bbox": [50, 810, 750, 950],
+          "blocks": [
+            {
+              "type": "table_body",
+              "lines": [
+                {
+                  "spans": [
+                    {
+                      "type": "table",
+                      "html": "<table style='border:1px;'><thead><tr><th colspan='2'>Header A/B</th><th>Header C</th></tr></thead><tbody><tr><td rowspan='2'>Cell 1</td><td>Cell 2 with <img src='images/tbl_img.png' alt='icon'/></td><td><eq>\\alpha + \\beta</eq></td></tr><tr><td>Cell 4</td><td>Cell 5</td></tr></tbody></table>",
+                      "image_path": "images/tbl_img.png"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_caption",
+              "lines": [
+                {"spans": [{"type": "text", "content": "Table 1.1: Benchmark results"}]}
+              ]
+            }
+          ]
+        },
+        {
+          "type": "list",
+          "attribute": "ordered",
+          "bbox": [50, 960, 750, 1020],
+          "blocks": [
+            {
+              "type": "list_item",
+              "lines": [{"spans": [{"type": "text", "content": "1. First ordered item"}]}]
+            },
+            {
+              "type": "list_item",
+              "lines": [{"spans": [{"type": "text", "content": "2. Second ordered item"}]}]
+            }
+          ]
+        },
+        {
+          "type": "list",
+          "attribute": "unordered",
+          "bbox": [50, 1030, 750, 1080],
+          "blocks": [
+            {
+              "type": "list_item",
+              "lines": [{"spans": [{"type": "text", "content": "* First bullet"}]}]
+            },
+            {
+              "type": "list_item",
+              "lines": [{"spans": [{"type": "text", "content": "* Second bullet"}]}]
+            }
+          ]
+        },
+        {
+          "type": "list",
+          "sub_type": "ref_text",
+          "bbox": [50, 1090, 750, 1130],
+          "blocks": [
+            {
+              "type": "list_item",
+              "lines": [{"spans": [{"type": "text", "content": "[1] Knuth, D. The Art of Computer Programming."}]}]
+            }
+          ]
+        },
+        {
+          "type": "index",
+          "bbox": [50, 1140, 750, 1170],
+          "lines": [
+            {"spans": [{"type": "text", "content": "Algorithms, 12-15"}]}
+          ]
+        },
+        {
+          "type": "unrecognized_banner",
+          "bbox": [50, 1175, 750, 1195],
+          "lines": [
+            {"spans": [{"type": "text", "content": "Notice: experimental feature"}]}
+          ]
+        }
+      ],
+      "discarded_blocks": [
+        {
+          "type": "page_number",
+          "bbox": [400, 1140, 450, 1160],
+          "lines": [{"spans": [{"type": "text", "content": "1"}]}]
+        },
+        {
+          "type": "page_footnote",
+          "bbox": [50, 1150, 600, 1170],
+          "lines": [{"spans": [{"type": "text", "content": "* Footnote on page 1."}]}]
+        }
+      ]
+    }
+  ]
+}

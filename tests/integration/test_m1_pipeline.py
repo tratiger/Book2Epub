@@ -53,11 +53,11 @@ def test_m1_end_to_end_with_mock_mineru(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr("book2epub.pipeline.execute_mineru", mock_execute_mineru)
 
-    # First run: should execute mock MinerU and reach end of M1 (NotImplementedStageError for M2)
+    # First run: should execute mock MinerU and reach end of M2 (NotImplementedStageError for M3)
     with pytest.raises(NotImplementedStageError) as exc_info:
         run_pipeline(pages_dir, out_epub, cfg)
 
-    assert "Milestone M1 (Ingest and MinerU) succeeded" in str(exc_info.value)
+    assert "Milestones M1 and M2 succeeded" in str(exc_info.value)
     assert call_count == 1
 
     # Verify artifacts from first run
