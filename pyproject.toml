@@ -60,4 +60,6 @@ addopts = "--basetemp=.pytest_temp"
 markers = [
     "epubcheck: marks tests requiring EPUBCheck jar",
     "gpu: marks tests requiring NVIDIA GPU",
+    "slow: marks slow running tests",
+    "integration: marks integration tests",
 ]

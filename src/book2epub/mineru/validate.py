@@ -99,6 +99,8 @@ def verify_referenced_images_exist(
     missing: list[str] = []
     for rel_path in image_paths:
         target = base_dir / rel_path
+        if not target.is_file() and (base_dir / "images" / rel_path).is_file():
+            target = base_dir / "images" / rel_path
         if not target.is_file():
             missing.append(rel_path)
 

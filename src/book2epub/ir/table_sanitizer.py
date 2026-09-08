@@ -125,6 +125,8 @@ def sanitize_table_html(
                     # Register local asset if registry provided
                     if asset_registry and base_dir:
                         local_img_path = base_dir / val
+                        if not local_img_path.is_file() and (base_dir / "images" / val).is_file():
+                            local_img_path = base_dir / "images" / val
                         if local_img_path.is_file():
                             asset_id = asset_registry.register_asset(local_img_path, role="figure")
                             elem.attrib["data-asset-id"] = asset_id

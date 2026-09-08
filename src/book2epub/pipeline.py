@@ -2,6 +2,7 @@
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -73,12 +74,26 @@ def run_conversion_m1(
     )
 
     canonical_middle = paths.mineru_canonical_middle_json
-    can_skip = not force_mineru and is_mineru_cache_valid(
-        paths.mineru_stage_file, cache_key, canonical_middle
+    global_cache_dir = cfg.app.work_dir / "cache" / cache_key
+    cached_canonical = global_cache_dir / "canonical"
+    cached_stage = global_cache_dir / "stage.json"
+    cached_middle = cached_canonical / "book_middle.json"
+
+    can_skip = not force_mineru and (
+        is_mineru_cache_valid(paths.mineru_stage_file, cache_key, canonical_middle)
+        or (
+            global_cache_dir.is_dir()
+            and is_mineru_cache_valid(cached_stage, cache_key, cached_middle)
+        )
     )
 
     if can_skip:
         logger.info("[Stage 2/6] Skipping MinerU execution (cache hit).")
+        if not canonical_middle.is_file() and cached_middle.is_file():
+            paths.mineru_dir.mkdir(parents=True, exist_ok=True)
+            if cached_stage.is_file():
+                shutil.copy2(cached_stage, paths.mineru_stage_file)
+            shutil.copytree(cached_canonical, paths.mineru_canonical_dir, dirs_exist_ok=True)
     else:
         logger.info("[Stage 2/6] Executing MinerU hybrid-engine...")
         try:
@@ -117,6 +132,13 @@ def run_conversion_m1(
                 canonical_middle_json=canonical_middle,
                 page_count=manifest.total_pages,
             )
+
+            # Populate global cache
+            global_cache_dir.mkdir(parents=True, exist_ok=True)
+            if paths.mineru_stage_file.is_file():
+                shutil.copy2(paths.mineru_stage_file, cached_stage)
+            if paths.mineru_canonical_dir.is_dir():
+                shutil.copytree(paths.mineru_canonical_dir, cached_canonical, dirs_exist_ok=True)
         except Exception:
             record_mineru_stage_failed(
                 paths.mineru_stage_file,

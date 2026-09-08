@@ -86,6 +86,16 @@ class MiddleJsonAdapter:
         self._block_seq += 1
         return f"{prefix}-{self._block_seq:05d}"
 
+    def resolve_image_path(self, img_rel_path: str) -> Path:
+        """Resolve image path relative to base_dir or base_dir / images."""
+        p = self.base_dir / img_rel_path
+        if p.is_file():
+            return p
+        images_p = self.base_dir / "images" / img_rel_path
+        if images_p.is_file():
+            return images_p
+        return p
+
     def extract_source_ref(
         self,
         block: dict[str, Any],
@@ -251,7 +261,7 @@ class MiddleJsonAdapter:
                                     img_rel_path = sp.get("image_path")
 
                     if img_rel_path:
-                        local_path = self.base_dir / img_rel_path
+                        local_path = self.resolve_image_path(img_rel_path)
                         role: Literal[
                             "figure", "chart", "table-fallback", "equation-fallback", "cover"
                         ] = "chart" if b_type == "chart" else "figure"
@@ -331,7 +341,7 @@ class MiddleJsonAdapter:
 
                     fallback_asset_id = None
                     if fallback_img_path:
-                        local_fb = self.base_dir / fallback_img_path
+                        local_fb = self.resolve_image_path(fallback_img_path)
                         if local_fb.is_file():
                             fallback_asset_id = self.registry.register_asset(
                                 local_fb, role="table-fallback"
@@ -412,7 +422,7 @@ class MiddleJsonAdapter:
 
                     fallback_id = None
                     if fallback_img_path:
-                        local_fb = self.base_dir / fallback_img_path
+                        local_fb = self.resolve_image_path(fallback_img_path)
                         if local_fb.is_file():
                             fallback_id = self.registry.register_asset(
                                 local_fb, role="equation-fallback"
