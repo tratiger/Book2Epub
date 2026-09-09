@@ -1,285 +1,358 @@
-# 00 - Product and Architecture Contract
+# Book2Epub Product and Architecture Contract — M6-M12 Revision
 
 ## 1. Product goal
 
-Book2Epub transforms a sequence of already-cleaned book page images into a normal, reflowable EPUB 3.3 suitable for technical books such as programming, mathematics, networking, security, and scientific texts.
+Convert cleaned technical-book page images into a readable, structurally faithful, ordinary **reflowable EPUB 3.3**.
 
-The source images are assumed to have already undergone book-photo correction such as dewarping, perspective correction, shadow cleanup, cropping, and page separation in a tool such as vFlat.
+“Faithful” has three dimensions:
 
-The product is not a scanner. Its responsibility starts at clean page images.
+1. **content fidelity** — text/code/math/table/figure information is not lost or invented;
+2. **semantic fidelity** — headings, paragraphs, code, terminal output, tables, callouts, lists, captions and relationships reflect the book’s meaning and context;
+3. **presentation fidelity** — the EPUB reproduces the book’s visual grammar (hierarchy, spacing rhythm, heading rules, code/callout/table treatment) without reproducing fixed page coordinates.
 
-## 2. What "faithful to the original" means
-
-Faithfulness is semantic and relational, not pixel-coordinate reproduction.
-
-Book2Epub MUST preserve, when MinerU provides enough information:
-
-- prose text and reading order;
-- chapter/section/subsection hierarchy;
-- inline and display mathematics;
-- code blocks and algorithm blocks;
-- figure images, charts, captions, and figure footnotes;
-- table structure, captions, footnotes, rowspan/colspan, and embedded table images when present;
-- lists and reference-style lists;
-- page side notes and page footnotes when they contain meaningful content;
-- source-page boundaries and recognized printed page labels;
-- approximate relative figure/table width and alignment intent;
-- source location/provenance for QA.
-
-Book2Epub MUST NOT preserve print layout by absolute positioning. Multi-column source pages become a single logical reading flow. Text wrapping is controlled by the EPUB reader. Source pagination is represented with EPUB pagebreak anchors/page-list, not by forcing page-sized screens.
-
-## 3. Non-goals
-
-- Perfect recreation of print typography.
-- Font-family identification from scanned pixels.
-- Reconstructing arbitrary decorative backgrounds.
-- Preserving exact line wrapping from print.
-- Preserving multi-column display on narrow EPUB readers.
-- Semantic correction by an LLM.
-- Copyediting OCR errors beyond deterministic whitespace/hyphen normalization.
-- DRM.
-- Cloud processing.
-
-## 4. Architecture
+## 2. Approved architecture
 
 ```text
-[Input directory]
-  jpg/png/tiff/webp page images
-        |
-        v
-[Ingest]
-  validate -> natural-sort -> hash manifest
-        |
-        v
-[Source PDF]
-  img2pdf 0.6.3; lossless container wherever supported
-        |
-        v
-[MinerU]
-  3.4.5
-  backend=hybrid-engine
-  effort=high
-  method=ocr
-  formula=true
-  table=true
-  image-analysis=true
-  local models
-        |
-        v
-[*_middle.json + MinerU image assets]
-        |
-        v
-[MiddleJsonAdapter]
-  strict version/backend validation
-  no content-list dependency
-        |
-        v
-[BookIR]
-  semantic nodes + full provenance + layout hints
-        |
-        v
-[Normalizer]
-  deterministic cross-page joining, page labels,
-  heading tree, asset linking, sanitization
-        |
-        v
-[ReflowRenderer]
-  XHTML 5 + MathML + CSS + semantic EPUB markup
-        |
-        v
-[EpubWriter]
-  OCF ZIP + package.opf + nav.xhtml + spine/manifest
-        |
-        v
-[EPUBCheck 5.3.0]
-        |
-        v
-[book.epub + JSON/HTML QA report]
+[clean source pages]
+       |
+       v
+[M0-M1 existing ingest + MinerU]
+       |
+       v
+[authoritative middle.json]
+       |
+       v
+[existing MiddleJsonAdapter]
+       |
+       v
+[Raw BookIR]
+       |
+       +-------------------------- semantic OFF -------------------------+
+       |                                                                   |
+       |                                                        existing normalize
+       |                                                                   |
+       |                                                                   v
+       |                                                              legacy render
+       |
+       +-- semantic ON --------------------------------------------------+
+           |
+           v
+[M6 SemanticEvidence / SemanticDraft]
+  multiple source representations preserved
+  exact content hashes + bbox + raw source type
+           |
+           v
+[M7 Provider abstraction]
+  Ollama | OpenAI | Google Gemini | Anthropic
+  strict Structured Outputs
+           |
+           v
+[M8 document-level semantic reconstruction]
+  BookState + BookOutline
+  dynamic chunks + overlap reconciliation
+  retype / heading hierarchy / relations
+           |
+           v
+[M9 optional visual arbitration]
+  source-page/crop evidence
+  ambiguous semantic decisions
+  OPTIONAL OCR correction (default OFF)
+           |
+           v
+[Semantic BookIR + outline/state]
+           |
+           v
+[existing deterministic normalize, amended]
+           |
+           v
+[M10a presentation-profile resolution]
+  legacy | enhanced | infer
+  resolve BookStyleProfile / finite design tokens
+           |
+           v
+[M11 typography/list normalization]
+  Japanese/Latin spacing, punctuation, list markers
+  may consume BookStyleProfile paragraph-indent intent
+           |
+           v
+[M10b deterministic component renderer + CSS generator]
+  semantic component + BookStyleProfile -> XHTML/CSS
+           |
+           v
+[existing native EPUB packaging + EPUBCheck]
+           |
+           v
+[M12 semantic/presentation QA]
 ```
 
-## 5. Frozen versions
+## 3. Explicitly rejected architecture
 
-The initial supported production stack is deliberately narrow:
+Do not implement:
 
-| Component | Version/contract |
-|---|---|
-| Python | 3.12.x |
-| MinerU | exactly 3.4.5 stable |
-| MinerU backend | hybrid-engine |
-| MinerU effort | high |
-| img2pdf | 0.6.3 |
-| latex2mathml | 3.81.0 |
-| EPUB | 3.3 |
-| EPUBCheck | 5.3.0 |
-| OS | Windows 11 x64 |
+- permanent MinerU+PaddleOCR ensemble;
+- MinerU-Popo as required runtime package/service;
+- whole book -> frontier VLM -> regenerated EPUB;
+- LLM-written final Markdown/XHTML/CSS;
+- fixed-layout primary EPUB;
+- scanned-page background + OCR overlay;
+- arbitrary absolute positioning;
+- mandatory cloud processing;
+- WSL/Docker requirement.
 
-MinerU 4.0 alpha is explicitly unsupported.
+## 4. Why MinerU remains the perception layer
 
-## 6. Why `middle.json` is the only MinerU source of truth
+MinerU is retained as the page/document perception system because M0-M5 already preserve its detailed `middle.json` provenance and assets. The new system addresses a different failure mode: **local classification is not equal to book-level semantic interpretation**.
 
-MinerU documents `content_list.json` as a simplified representation that flattens readable blocks and removes complex layout information. `middle.json` retains per-page structure such as `preproc_blocks`, `page_idx`, `page_size`, `images`, `tables`, `interline_equations`, `discarded_blocks`, and `para_blocks`, with block -> line -> span hierarchy and bbox information.
-
-For hybrid output, current MinerU source also records `_backend: "hybrid"`, `_effort`, `_ocr_enable`, `_version_name`, performs title-level normalization, code/algorithm block construction, and cross-page table processing before final output.
-
-Book2Epub therefore reads `middle.json` directly and treats all derived MinerU Markdown/content-list outputs as debug-only artifacts.
-
-## 7. Source-page images in the final EPUB
-
-A whole source page image MUST NOT be included as a content page or background.
-
-Permitted images in the EPUB are only content resources, including:
-
-- MinerU-extracted figure images;
-- charts;
-- photographs;
-- table images only when structured HTML is unavailable or invalid;
-- equation image only as an explicit conversion fallback;
-- an explicitly supplied cover image.
-
-The original full-page images remain outside the EPUB in the job workspace for QA.
-
-## 8. Layout-intent reconstruction
-
-bbox is used only for deterministic hints:
-
-- block order validation;
-- source page boundary;
-- relative width ratio;
-- centered/left/right alignment class;
-- identifying visual blocks near captions/notes;
-- detecting probable sidebar placement;
-- QA links back to source coordinates.
-
-Never generate CSS `position:absolute`, fixed viewport dimensions, source-page-height containers, or print-column CSS from bbox.
-
-### Figure width classes
-
-For a visual block bbox `[x0,y0,x1,y1]` on source `page_size=[W,H]`, compute `r=(x1-x0)/W`.
-
-- `r <= 0.36`: `size-small`
-- `0.36 < r <= 0.72`: `size-medium`
-- `r > 0.72`: `size-large`
-
-CSS remains responsive: all images have `max-width:100%; height:auto`.
-
-### Alignment class
-
-Let block center be `cx=(x0+x1)/2` and normalized center delta `d=(cx-W/2)/W`.
-
-- `abs(d) <= 0.07`: center
-- `d < -0.07`: left
-- `d > 0.07`: right
-
-Alignment is implemented only by block margins/text-align; never by floating text around the visual.
-
-## 9. Error philosophy
-
-Quality is preferred over silent completion.
-
-Fatal errors include:
-
-- unsupported MinerU version/backend;
-- malformed `middle.json` root/page structure;
-- missing referenced MinerU content image when no semantic substitute exists;
-- duplicate EPUB resource paths;
-- invalid XML/XHTML generated by Book2Epub;
-- EPUBCheck error;
-- no meaningful content parsed from a non-empty book.
-
-Recoverable conditions create warnings and deterministic fallback where explicitly defined:
-
-- formula MathML conversion failure -> equation image if available, otherwise escaped LaTeX text with a visible warning marker in QA report;
-- missing figure caption -> image remains with empty-alt unless descriptive content exists;
-- table HTML unavailable -> use MinerU table image;
-- unknown source page label -> generate `scan-N` label for page-list;
-- unknown title level -> preserve heading as level 2 and issue warning unless normalizer can deterministically derive a numbered hierarchy.
-
-## 10. Job workspace contract
-
-Each conversion gets a stable job directory:
+Example:
 
 ```text
-.work/jobs/<job-id>/
-  input/
-    manifest.json
-    source.pdf
-  mineru/
-    raw/                 # unmodified MinerU output tree
-    canonical/
-      book_middle.json
-      images/
-  ir/
-    bookir.raw.json
-    bookir.normalized.json
-  render/
-    OEBPS/...            # unpacked EPUB payload before zipping
-  validation/
-    epubcheck.json
-    epubcheck.txt
-    structural-report.json
-  qa/
-    report.html
-    report.json
-  logs/
-    book2epub.log
+preceding prose: “次のコマンドを実行すると、以下の出力になります。”
+MinerU block: table
+content: shell-like aligned text
 ```
 
-Original user image files are never modified.
+M8 may reclassify this to `terminal_output` without changing the characters.
 
-## 11. Cache identity
+## 5. MinerU-Popo adoption policy
 
-The MinerU stage cache key is SHA-256 over:
+Adopt the following design ideas:
 
-- ordered input-file SHA-256 values;
-- ordered relative input names;
-- MinerU version;
-- backend;
-- effort;
-- OCR/formula/table/image-analysis settings;
-- Book2Epub ingest schema version.
+- document-level postprocessing after page perception;
+- cross-page semantic reasoning;
+- heading hierarchy reconstruction;
+- image/text relation reasoning;
+- dynamic chunking rather than one uncontrolled whole-book prompt;
+- overlap/synchronization across chunks.
 
-If this key matches a completed MinerU stage, MinerU must not be rerun unless `--force-mineru` is passed.
+Do not import/run MinerU-Popo itself in M6-M12.
 
-Renderer changes do not invalidate MinerU cache.
+## 6. Three IR layers
 
-## 12. Public CLI surface
+### 6.1 Raw BookIR
 
-Required commands:
+Existing adapter output. It represents MinerU’s best first interpretation.
+
+### 6.2 SemanticEvidence / SemanticDraft
+
+A non-rendering evidence representation that preserves alternative views before a type is final:
 
 ```text
-book2epub convert INPUT_DIR -o OUTPUT.epub
-book2epub from-middle MIDDLE_JSON -o OUTPUT.epub
-book2epub doctor
-book2epub inspect-middle MIDDLE_JSON
-book2epub validate EPUB_FILE
+block id
+page / bbox
+MinerU source type
+current Raw BookIR kind
+plain text
+preformatted line text
+structured table HTML availability
+asset/caption/note evidence
+source span/line references
+content hashes
+allowed semantic targets
+context pointers
 ```
 
-Required common options:
+This layer is mandatory when semantic processing is enabled.
+
+### 6.3 Semantic BookIR
+
+Raw BookIR after validated structural decisions. It remains a flat source-order block list for compatibility, with parallel `BookOutline` and `BookState` metadata.
+
+## 7. Semantic authority boundaries
+
+The semantic reviewer may determine:
+
+- block semantic type;
+- preformatted subtype;
+- heading level;
+- list/callout/quote/example interpretation;
+- relationships such as caption/note attachment when source evidence supports it;
+- uncertainty/confidence.
+
+It may not:
+
+- rewrite arbitrary prose;
+- invent table cells;
+- invent code or commands;
+- generate missing captions;
+- rewrite math;
+- translate content;
+- make final CSS/XHTML.
+
+## 8. OCR correction boundary
+
+OCR correction is a **separate feature**:
 
 ```text
---title TEXT
---author TEXT                 repeatable
---language TEXT               BCP 47; default auto
---identifier TEXT             default urn:uuid:<generated>
---publisher TEXT
---cover-image PATH
---work-dir PATH               default .work
---keep-work / --no-keep-work  default keep
---force-mineru
---strict / --no-strict        default strict
--v / --verbose
+off  = immutable source text (default)
+safe = visual-evidence-gated prose-like local corrections
+all  = additionally permits sensitive non-math textual blocks under stricter double validation
 ```
 
-`convert` also supports `--mineru-model-source {local,huggingface,modelscope}` but the default normal-conversion value MUST be `local`. Remote sources are permitted only for explicit setup/bootstrap behavior, not silently.
+Even `all` does not alter LaTeX/math in M6-M12.
 
-## 13. Final outputs
+No OCR correction can occur from text context alone. The original page/crop must be available to a vision-capable provider.
 
-A successful conversion produces:
+## 9. BookState
 
-- requested `.epub`;
-- retained job workspace;
-- QA report path printed to console;
-- summary with block counts and warnings;
-- EPUBCheck result.
+BookState is a compact, auditable document-level memory, not free-form hidden model memory.
 
-Exit code is non-zero on fatal error or EPUBCheck validation failure.
+It contains observed patterns such as:
+
+- heading numbering/style patterns;
+- known section hierarchy;
+- code languages observed in source;
+- shell/REPL conventions;
+- recurring callout visual signatures;
+- figure/table/listing numbering patterns;
+- observed glossary/domain terms;
+- visual component conventions.
+
+It is serialized to JSON and supplied to later chunks as bounded context.
+
+BookState never authorizes text changes.
+
+## 10. BookOutline
+
+Keep `BookIR.blocks` flat. Add a separate logical tree:
+
+```text
+BookOutline
+  -> chapter nodes
+     -> section nodes
+        -> subsection nodes
+```
+
+Each outline node refers to existing heading/block ids. It does not duplicate book text.
+
+Renderer splitting/TOC should use outline when semantic mode produced a valid outline; legacy mode retains existing heading-driven behavior.
+
+## 11. Presentation architecture
+
+Presentation is not raw CSS inference.
+
+```text
+semantic component
+      +
+source visual evidence
+      +
+BookStyleProfile
+      |
+      v
+finite presentation tokens
+      |
+      v
+deterministic component renderer / CSS generator
+```
+
+Modes:
+
+- `legacy`: use current M3 CSS/render behavior as compatibility path;
+- `enhanced`: richer fixed Book2Epub component theme, no model style inference;
+- `infer`: vision model examines deterministic representative pages and selects a finite `BookStyleProfile`; on inference failure, fall back to `enhanced`.
+
+The model cannot emit CSS strings.
+
+## 12. Component vocabulary
+
+M6-M10 may add at least:
+
+```text
+Paragraph
+Heading
+PreformattedBlock
+  source_code
+  shell_command
+  terminal_output
+  terminal_session
+  repl_session
+  log_output
+  config_file
+  generic_preformatted
+Callout
+  note | tip | warning | caution | important | sidebar
+BlockQuote
+DefinitionList
+ExampleBlock
+ExerciseBlock
+ListBlock
+Table
+Figure
+Chart
+DisplayMath
+Footnote
+IndexBlock
+```
+
+Existing `CodeBlock` remains accepted for backward compatibility; semantic mode may normalize it into richer component semantics where appropriate.
+
+## 13. Japanese typography principle
+
+Do not ask an LLM to “make the Japanese spacing natural.” M11 uses source segment/bbox evidence and deterministic rules.
+
+The enhanced pipeline distinguishes:
+
+- a real source-space observed within a line;
+- a space inserted only because two OCR spans/lines were joined;
+- a line-wrap boundary;
+- Japanese punctuation/bracket boundaries;
+- code/preformatted text, which is excluded from prose normalization.
+
+## 14. Provider abstraction
+
+Supported M7 providers:
+
+```text
+ollama     local
+openai     cloud; explicit allow-cloud
+google    cloud via Google Gemini / AI Studio API; explicit allow-cloud
+anthropic  cloud; explicit allow-cloud
+```
+
+No provider framework such as LangChain/LiteLLM is required. Use thin direct adapters.
+
+Provider models are configurable. Frozen recommended quality defaults are documented in Appendix G, but the user may set another model string.
+
+## 15. Structured Outputs rule
+
+Every provider call that affects structure/style/correction must request schema-constrained JSON using the provider’s native feature and then validate with the same Pydantic model locally.
+
+A provider response that parses as JSON but fails the Pydantic model is a failed call, not “best effort”.
+
+## 16. Cloud privacy
+
+Cloud use is always explicit.
+
+- OpenAI: `store=False`.
+- Google Interactions API: `store=False`.
+- Anthropic: no Book2Epub server-side conversation/file reuse; send request-scoped base64 images only.
+- no uploaded Files API persistence for M6-M12.
+- provider usage logs store request hashes and token/usage metadata, not API credentials.
+
+## 17. Caching
+
+Add stage caches independent of MinerU cache:
+
+```text
+semantic evidence
+semantic outline/state
+semantic decisions
+visual arbitration
+ocr correction
+presentation profile
+render
+```
+
+A change to style profile must not invalidate MinerU or semantic perception. A change to semantic decisions invalidates presentation/render/package/QA.
+
+Cache keys must include provider/model/schema/prompt contract version and relevant source hashes.
+
+## 18. Final quality priorities
+
+1. no invented/lost technical content;
+2. correct reading order and semantic classification;
+3. correct section hierarchy;
+4. code/terminal/table/math fidelity;
+5. readable EPUB-reader-compatible presentation;
+6. natural Japanese/Latin spacing and list rendering;
+7. source visual grammar translated into reflow-safe styles;
+8. speed/cost.
