@@ -10,9 +10,14 @@ from book2epub.ir.assets import AssetRegistry
 from book2epub.ir.models import (
     Aside,
     Block,
+    BlockQuote,
+    Callout,
     Chart,
     CodeBlock,
+    DefinitionList,
     DisplayMath,
+    ExampleBlock,
+    ExerciseBlock,
     Figure,
     Footnote,
     Heading,
@@ -27,6 +32,7 @@ from book2epub.ir.models import (
     PageBoundary,
     PageBreak,
     Paragraph,
+    PreformattedBlock,
     Table,
     Text,
     UnknownBlock,
@@ -263,10 +269,14 @@ class DocumentRenderer:
 
     def render_block(self, block: Block) -> None:
         """Render a single BookIR Block into document body."""
+        self.render_block_into(self.body, block)
+
+    def render_block_into(self, parent: etree._Element, block: Block) -> None:
+        """Render a single BookIR Block into the given parent element."""
         if isinstance(block, PageBreak):
             lbl = block.label or f"scan-{block.page_idx + 1}"
             span = self._render_pagebreak_element(block.page_idx, lbl)
-            self.body.append(span)
+            parent.append(span)
 
         elif isinstance(block, Heading):
             lvl = block.level if block.level is not None else 2
@@ -290,7 +300,7 @@ class DocumentRenderer:
                     )
                 )
 
-            h_el = etree.SubElement(self.body, f"{{{NS_XHTML}}}{tag}", attrib=attribs)
+            h_el = etree.SubElement(parent, f"{{{NS_XHTML}}}{tag}", attrib=attribs)
             self._render_inlines(h_el, block.inlines)
 
             # Record in TOC if level 1..3
@@ -304,12 +314,12 @@ class DocumentRenderer:
                 )
 
         elif isinstance(block, Paragraph):
-            p = etree.SubElement(self.body, f"{{{NS_XHTML}}}p")
+            p = etree.SubElement(parent, f"{{{NS_XHTML}}}p")
             self._render_inlines(p, block.inlines)
 
         elif isinstance(block, DisplayMath):
             div = etree.SubElement(
-                self.body,
+                parent,
                 f"{{{NS_XHTML}}}div",
                 attrib={"class": "math display"},
             )
@@ -366,7 +376,7 @@ class DocumentRenderer:
 
             if has_caption or has_footnotes:
                 fig = etree.SubElement(
-                    self.body,
+                    parent,
                     f"{{{NS_XHTML}}}figure",
                     attrib={"class": "code-listing"},
                 )
@@ -387,7 +397,7 @@ class DocumentRenderer:
                     )
                     self._render_inlines(fn_div, block.footnotes)
             else:
-                pre = etree.SubElement(self.body, f"{{{NS_XHTML}}}pre")
+                pre = etree.SubElement(parent, f"{{{NS_XHTML}}}pre")
                 c_attribs = {"class": lang_attr} if lang_attr else {}
                 code_el = etree.SubElement(pre, f"{{{NS_XHTML}}}code", attrib=c_attribs)
                 code_el.text = block.text
@@ -396,7 +406,7 @@ class DocumentRenderer:
             cls_base = "figure" if isinstance(block, Figure) else "chart"
             layout_cls = self._get_layout_classes(block.layout_hint)
             fig = etree.SubElement(
-                self.body,
+                parent,
                 f"{{{NS_XHTML}}}figure",
                 attrib={"class": f"{cls_base} {layout_cls}"},
             )
@@ -437,7 +447,7 @@ class DocumentRenderer:
         elif isinstance(block, Table):
             layout_cls = self._get_layout_classes(block.layout_hint)
             fig = etree.SubElement(
-                self.body,
+                parent,
                 f"{{{NS_XHTML}}}figure",
                 attrib={"class": f"table-figure {layout_cls}"},
             )
@@ -498,24 +508,73 @@ class DocumentRenderer:
                 list_tag = "ul"
                 l_attribs = {"class": "list-marker-preserved"}
 
-            list_el = etree.SubElement(self.body, f"{{{NS_XHTML}}}{list_tag}", attrib=l_attribs)
+            list_el = etree.SubElement(parent, f"{{{NS_XHTML}}}{list_tag}", attrib=l_attribs)
             for item_inlines in block.items:
                 li = etree.SubElement(list_el, f"{{{NS_XHTML}}}li")
                 self._render_inlines(li, item_inlines)
 
         elif isinstance(block, Aside):
             aside_el = etree.SubElement(
-                self.body,
+                parent,
                 f"{{{NS_XHTML}}}aside",
                 attrib={"class": f"aside aside-{block.subtype}"},
             )
             p = etree.SubElement(aside_el, f"{{{NS_XHTML}}}p")
             self._render_inlines(p, block.inlines)
 
+        elif isinstance(block, PreformattedBlock):
+            # M10 Legacy Semantic Bridge: PreformattedBlock -> selectable <pre>/<code>
+            pre = etree.SubElement(parent, f"{{{NS_XHTML}}}pre")
+            code_el = etree.SubElement(pre, f"{{{NS_XHTML}}}code")
+            code_el.text = block.text
+
+        elif isinstance(block, Callout):
+            # M10 Legacy Semantic Bridge: Callout -> conservative <aside class="aside ...">
+            st = block.subtype or "note"
+            aside_el = etree.SubElement(
+                parent,
+                f"{{{NS_XHTML}}}aside",
+                attrib={"class": f"aside aside-{st}"},
+            )
+            for child in block.blocks:
+                self.render_block_into(aside_el, child)
+
+        elif isinstance(block, BlockQuote):
+            # M10 Legacy Semantic Bridge: BlockQuote -> semantic <blockquote>
+            bq = etree.SubElement(parent, f"{{{NS_XHTML}}}blockquote")
+            if hasattr(block, "blocks") and getattr(block, "blocks"):
+                for child in block.blocks:
+                    self.render_block_into(bq, child)
+            elif hasattr(block, "inlines") and getattr(block, "inlines"):
+                p = etree.SubElement(bq, f"{{{NS_XHTML}}}p")
+                self._render_inlines(p, block.inlines)
+
+        elif isinstance(block, DefinitionList):
+            # M10 Legacy Semantic Bridge: DefinitionList -> <dl>/<dt>/<dd>
+            dl = etree.SubElement(parent, f"{{{NS_XHTML}}}dl")
+            for item in block.items:
+                dt = etree.SubElement(dl, f"{{{NS_XHTML}}}dt")
+                self._render_inlines(dt, item.term)
+                for defn in item.definitions:
+                    dd = etree.SubElement(dl, f"{{{NS_XHTML}}}dd")
+                    self._render_inlines(dd, defn)
+
+        elif isinstance(block, ExampleBlock):
+            # M10 Legacy Semantic Bridge: ExampleBlock -> <section class="example">
+            sec = etree.SubElement(parent, f"{{{NS_XHTML}}}section", attrib={"class": "example"})
+            for child in block.blocks:
+                self.render_block_into(sec, child)
+
+        elif isinstance(block, ExerciseBlock):
+            # M10 Legacy Semantic Bridge: ExerciseBlock -> <section class="exercise">
+            sec = etree.SubElement(parent, f"{{{NS_XHTML}}}section", attrib={"class": "exercise"})
+            for child in block.blocks:
+                self.render_block_into(sec, child)
+
         elif isinstance(block, Footnote):
             fn_id = f"fn-{block.id}"
             aside_el = etree.SubElement(
-                self.body,
+                parent,
                 f"{{{NS_XHTML}}}aside",
                 attrib={
                     "id": fn_id,
@@ -528,7 +587,7 @@ class DocumentRenderer:
 
         elif isinstance(block, IndexBlock):
             sec = etree.SubElement(
-                self.body,
+                parent,
                 f"{{{NS_XHTML}}}section",
                 attrib={
                     f"{{{NS_EPUB}}}type": "index",
@@ -542,7 +601,7 @@ class DocumentRenderer:
         elif isinstance(block, UnknownBlock):
             if block.extracted_text:
                 div = etree.SubElement(
-                    self.body,
+                    parent,
                     f"{{{NS_XHTML}}}div",
                     attrib={"class": "unknown-block"},
                 )
@@ -558,7 +617,7 @@ class DocumentRenderer:
                 asset = self.registry.get_asset(block.asset_id)
                 if asset:
                     fig = etree.SubElement(
-                        self.body,
+                        parent,
                         f"{{{NS_XHTML}}}figure",
                         attrib={"class": "figure size-large align-center"},
                     )

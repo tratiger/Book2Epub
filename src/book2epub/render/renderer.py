@@ -3,9 +3,11 @@
 import json
 import logging
 import shutil
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from book2epub.config import PresentationConfig
 from book2epub.ir.assets import AssetRegistry
 from book2epub.ir.models import (
     BookIR,
@@ -18,6 +20,10 @@ from book2epub.ir.models import (
     Paragraph,
     Table,
 )
+from book2epub.presentation.css_generator import generate_book_css
+from book2epub.presentation.defaults import DEFAULT_ENHANCED_PROFILE
+from book2epub.presentation.models import BookStyleProfile, compute_profile_hash
+from book2epub.render.components import ComponentDocumentRenderer
 from book2epub.render.css import BOOK_CSS_CONTENT
 from book2epub.render.metadata import infer_metadata
 from book2epub.render.models import (
@@ -88,11 +94,15 @@ class ReflowRenderer:
         cli_title: str | None = None,
         cli_language: str | None = None,
         cli_identifier: str | None = None,
+        presentation_config: PresentationConfig | None = None,
+        profile: BookStyleProfile | None = None,
     ) -> None:
         self.output_dir = output_dir
         self.cli_title = cli_title
         self.cli_language = cli_language
         self.cli_identifier = cli_identifier
+        self.presentation_config = presentation_config or PresentationConfig()
+        self.profile = profile
 
     def render(self, bookir: BookIR) -> RenderResult:
         """
@@ -114,6 +124,17 @@ class ReflowRenderer:
         text_dir.mkdir(parents=True, exist_ok=True)
         styles_dir.mkdir(parents=True, exist_ok=True)
         images_dir.mkdir(parents=True, exist_ok=True)
+
+        mode = self.presentation_config.mode
+        if mode == "legacy":
+            css_content = BOOK_CSS_CONTENT
+            style_profile_hash: str | None = None
+        else:
+            active_profile = self.profile or DEFAULT_ENHANCED_PROFILE
+            css_content = generate_book_css(active_profile)
+            style_profile_hash = compute_profile_hash(active_profile)
+
+        total_component_counts: dict[str, int] = defaultdict(int)
 
         # 1. Resolve final metadata
         metadata = infer_metadata(
@@ -149,18 +170,35 @@ class ReflowRenderer:
             doc_path = oebps_dir / sec.href
             doc_path.parent.mkdir(parents=True, exist_ok=True)
 
-            doc_renderer = DocumentRenderer(
-                doc_href=sec.href,
-                doc_id=sec.doc_id,
-                title=metadata.title or "Section",
-                language=metadata.language or "und",
-                registry=registry,
-                global_heading_seq=global_heading_seq,
-                page_label_confidence_map=conf_map,
-            )
+            doc_renderer: DocumentRenderer | ComponentDocumentRenderer
+            if mode == "legacy":
+                doc_renderer = DocumentRenderer(
+                    doc_href=sec.href,
+                    doc_id=sec.doc_id,
+                    title=metadata.title or "Section",
+                    language=metadata.language or "und",
+                    registry=registry,
+                    global_heading_seq=global_heading_seq,
+                    page_label_confidence_map=conf_map,
+                )
+            else:
+                doc_renderer = ComponentDocumentRenderer(
+                    doc_href=sec.href,
+                    doc_id=sec.doc_id,
+                    title=metadata.title or "Section",
+                    language=metadata.language or "und",
+                    registry=registry,
+                    global_heading_seq=global_heading_seq,
+                    page_label_confidence_map=conf_map,
+                    profile=self.profile or DEFAULT_ENHANCED_PROFILE,
+                )
 
             for block in sec.blocks:
                 doc_renderer.render_block(block)
+
+            if hasattr(doc_renderer, "component_counts"):
+                for k, v in doc_renderer.component_counts.items():
+                    total_component_counts[k] += v
 
             # Advance global heading sequence
             global_heading_seq = doc_renderer.heading_seq
@@ -215,7 +253,7 @@ class ReflowRenderer:
 
         # 5. Write styles/book.css
         css_path = styles_dir / "book.css"
-        css_path.write_text(BOOK_CSS_CONTENT, encoding="utf-8")
+        css_path.write_text(css_content, encoding="utf-8")
 
         # 6. Copy assets to images/
         asset_manifest_entries: list[dict[str, Any]] = []
@@ -250,6 +288,9 @@ class ReflowRenderer:
             warnings=[
                 {"code": w.code, "message": w.message, "page_idx": w.page_idx} for w in all_warnings
             ],
+            presentation_mode=mode,
+            style_profile_hash=style_profile_hash,
+            component_counts=dict(total_component_counts),
         )
 
         manifest_path = oebps_dir / "render-manifest.json"
@@ -285,4 +326,7 @@ class ReflowRenderer:
             math_count=display_math_count + inline_math_count,
             fallback_count=fallback_count,
             warning_count=len(all_warnings),
+            presentation_mode=mode,
+            style_profile_hash=style_profile_hash,
+            component_counts=dict(total_component_counts),
         )

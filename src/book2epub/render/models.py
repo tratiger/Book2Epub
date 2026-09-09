@@ -50,6 +50,9 @@ class RenderManifest:
     assets: list[dict[str, Any]] = field(default_factory=list)
     styles: list[dict[str, str]] = field(default_factory=list)
     warnings: list[dict[str, Any]] = field(default_factory=list)
+    presentation_mode: str = "legacy"
+    style_profile_hash: str | None = None
+    component_counts: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -70,3 +73,6 @@ class RenderResult:
     math_count: int
     fallback_count: int
     warning_count: int
+    presentation_mode: str = "legacy"
+    style_profile_hash: str | None = None
+    component_counts: dict[str, int] = field(default_factory=dict)
