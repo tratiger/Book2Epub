@@ -16,6 +16,19 @@ dependencies = [
     "latex2mathml==3.81.0",
     "lxml>=5,<7",
     "pillow>=10.0.0",
+    "pypdfium2>=4.0.0",
+]
+
+[project.optional-dependencies]
+semantic-local = ["ollama==0.6.2"]
+semantic-openai = ["openai==3.10.0"]
+semantic-google = ["google-genai==2.22.0"]
+semantic-anthropic = ["anthropic==1.4.0"]
+semantic-all = [
+    "ollama==0.6.2",
+    "openai==3.10.0",
+    "google-genai==2.22.0",
+    "anthropic==1.4.0",
 ]
 
 [project.scripts]
@@ -50,6 +63,11 @@ warn_unused_configs = true
 module = [
     "img2pdf",
     "pypdfium2",
+    "torch",
+    "ollama",
+    "openai",
+    "google",
+    "anthropic",
 ]
 ignore_missing_imports = true
 
@@ -62,4 +80,7 @@ markers = [
     "gpu: marks tests requiring NVIDIA GPU",
     "slow: marks slow running tests",
     "integration: marks integration tests",
+    "provider_live: marks tests calling live provider APIs",
+    "provider_cloud: marks tests requiring cloud provider keys",
+    "provider_local: marks tests requiring local Ollama instance",
 ]
