@@ -99,3 +99,39 @@ class ValidationError(Book2EpubError):
 
     def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message, stage="validate", details=details)
+
+
+class SemanticError(Book2EpubError):
+    """Raised during semantic document reconstruction and adjudication."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, stage="semantic", details=details)
+
+
+class ProviderError(Book2EpubError):
+    """Raised when LLM/VLM provider invocation fails."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, stage="provider", details=details)
+
+
+class VisualReviewError(Book2EpubError):
+    """Raised during visual evidence arbitration."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, stage="visual", details=details)
+
+
+class OCRCorrectionError(Book2EpubError):
+    """Raised during OCR correction proposal or validation."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, stage="ocr_correction", details=details)
+
+
+class PresentationError(Book2EpubError):
+    """Raised during style profile inference or CSS generation."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message, stage="presentation", details=details)
+

@@ -18,7 +18,14 @@ from book2epub.ir.models import (
 )
 from book2epub.package.models import PackagingResult
 from book2epub.qa.checks import run_structural_checks
-from book2epub.qa.models import PageQASummary, QAReportData
+from book2epub.qa.models import (
+    OCRQAMetrics,
+    PageQASummary,
+    PresentationQAMetrics,
+    PreservationLedgerEntry,
+    QAReportData,
+    SemanticQAMetrics,
+)
 from book2epub.render.models import RenderResult
 from book2epub.version import __version__
 
@@ -35,6 +42,10 @@ def generate_qa_report(
     report_json_path: Path,
     report_html_path: Path,
     manifest_data: dict[str, Any] | None = None,
+    preservation_ledger: list[PreservationLedgerEntry] | None = None,
+    semantic_metrics: SemanticQAMetrics | None = None,
+    ocr_metrics: OCRQAMetrics | None = None,
+    presentation_metrics: PresentationQAMetrics | None = None,
 ) -> QAReportData:
     """Generate comprehensive JSON and standalone HTML QA reports for a conversion job."""
     # 1. Environment & Dependency info
@@ -113,6 +124,8 @@ def generate_qa_report(
         book_ir=book_ir,
         render_result=render_result,
         packaging_result=packaging_result,
+        preservation_ledger=preservation_ledger,
+        is_semantic=cfg.semantic.enabled,
     )
 
     # 7. Collect warnings
@@ -165,6 +178,10 @@ def generate_qa_report(
         structural_checks=checks,
         metrics=metrics,
         pages=pages_qa,
+        preservation_ledger=preservation_ledger or [],
+        semantic_metrics=semantic_metrics,
+        ocr_metrics=ocr_metrics,
+        presentation_metrics=presentation_metrics,
     )
 
     # Write report.json
@@ -209,6 +226,92 @@ def _render_qa_html(qa: QAReportData) -> str:
 
     epubcheck_color = "#16a34a" if qa.epubcheck_validation.get("passed") else "#dc2626"
     epubcheck_status = "PASS" if qa.epubcheck_validation.get("passed") else "FAIL"
+
+    semantic_section = ""
+    if qa.semantic_metrics:
+        trans_rows = "".join(
+            f"<tr><td><code>{k}</code></td><td>{v}</td></tr>"
+            for k, v in qa.semantic_metrics.type_transitions.items()
+        )
+        semantic_section = f"""
+    <h2>Semantic Reconstruction & Type Transitions</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="metric-lbl">Change Rate</div>
+        <div class="metric-val">{qa.semantic_metrics.semantic_change_rate * 100:.1f}%</div>
+      </div>
+      <div class="card">
+        <div class="metric-lbl">Auto-Apply Rate</div>
+        <div class="metric-val">{qa.semantic_metrics.semantic_auto_apply_rate * 100:.1f}%</div>
+      </div>
+      <div class="card">
+        <div class="metric-lbl">Conflict Rate</div>
+        <div class="metric-val">{qa.semantic_metrics.semantic_conflict_rate * 100:.1f}%</div>
+      </div>
+      <div class="card">
+        <div class="metric-lbl">Heading Level Known</div>
+        <div class="metric-val">{qa.semantic_metrics.heading_level_known_rate * 100:.1f}%</div>
+      </div>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Transition (Old -> New)</th><th>Count</th></tr>
+      </thead>
+      <tbody>
+        {trans_rows or "<tr><td colspan='2'>No type transitions recorded.</td></tr>"}
+      </tbody>
+    </table>
+    """
+
+    ocr_section = ""
+    if qa.ocr_metrics and qa.ocr_metrics.ocr_mode != "off":
+        ocr_section = f"""
+    <h2>Multimodal OCR Correction</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="metric-lbl">OCR Mode</div>
+        <div class="metric-val" style="font-size: 1.25rem;">{qa.ocr_metrics.ocr_mode}</div>
+      </div>
+      <div class="card">
+        <div class="metric-lbl">Applied Edits</div>
+        <div class="metric-val">{qa.ocr_metrics.ocr_applied_count}</div>
+      </div>
+      <div class="card">
+        <div class="metric-lbl">Changed Codepoints</div>
+        <div class="metric-val">{qa.ocr_metrics.ocr_changed_codepoints}</div>
+      </div>
+      <div class="card">
+        <div class="metric-lbl">Sensitive Confirmed</div>
+        <div class="metric-val">{qa.ocr_metrics.ocr_sensitive_confirmation_count}</div>
+      </div>
+    </div>
+    """
+
+    pres_section = ""
+    if qa.presentation_metrics:
+        pres_section = f"""
+    <h2>Presentation & Typography Quality</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="metric-lbl">Presentation Mode</div>
+        <div class="metric-val" style="font-size: 1.25rem;">
+          {qa.presentation_metrics.presentation_mode}
+        </div>
+      </div>
+      <div class="card">
+        <div class="metric-lbl">Duplicate List Markers</div>
+        <div class="metric-val" style="color: {
+            '#16a34a' if qa.presentation_metrics.list_duplicate_marker_count == 0 else '#dc2626'
+        };">
+          {qa.presentation_metrics.list_duplicate_marker_count}
+        </div>
+      </div>
+      <div class="card">
+        <div class="metric-lbl">Components Rendered</div>
+        <div class="metric-val">{sum(qa.presentation_metrics.component_counts.values())}</div>
+      </div>
+    </div>
+    """
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -298,6 +401,10 @@ def _render_qa_html(qa: QAReportData) -> str:
         </div>
       </div>
     </div>
+
+    {semantic_section}
+    {ocr_section}
+    {pres_section}
 
     <h2>Reconciliation Checks</h2>
     <table>

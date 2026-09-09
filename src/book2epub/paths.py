@@ -83,8 +83,24 @@ class JobPaths:
         return self.ir_dir / "bookir.raw.json"
 
     @property
+    def ir_semantic_json(self) -> Path:
+        return self.ir_dir / "bookir.semantic.json"
+
+    @property
+    def ir_corrected_json(self) -> Path:
+        return self.ir_dir / "bookir.corrected.json"
+
+    @property
     def ir_normalized_json(self) -> Path:
         return self.ir_dir / "bookir.normalized.json"
+
+    @property
+    def ir_typography_json(self) -> Path:
+        return self.ir_dir / "bookir.typography.json"
+
+    @property
+    def normalization_report_file(self) -> Path:
+        return self.presentation_dir / "normalization-report.json"
 
     @property
     def render_dir(self) -> Path:
@@ -130,6 +146,78 @@ class JobPaths:
     def log_file(self) -> Path:
         return self.logs_dir / "book2epub.log"
 
+    @property
+    def semantic_dir(self) -> Path:
+        return self.root / "semantic"
+
+    @property
+    def semantic_evidence_json(self) -> Path:
+        return self.semantic_dir / "evidence.json"
+
+    @property
+    def semantic_draft_json(self) -> Path:
+        return self.semantic_dir / "draft.json"
+
+    @property
+    def semantic_stage_json(self) -> Path:
+        return self.semantic_dir / "stage.json"
+
+    @property
+    def semantic_chunks_dir(self) -> Path:
+        return self.semantic_dir / "chunks"
+
+    @property
+    def semantic_decisions_dir(self) -> Path:
+        return self.semantic_dir / "decisions"
+
+    @property
+    def semantic_book_state_json(self) -> Path:
+        return self.semantic_dir / "book_state.json"
+
+    @property
+    def semantic_outline_json(self) -> Path:
+        return self.semantic_dir / "outline.json"
+
+    @property
+    def semantic_applied_json(self) -> Path:
+        return self.semantic_dir / "applied.json"
+
+    @property
+    def semantic_provider_usage_json(self) -> Path:
+        return self.semantic_dir / "provider-usage.json"
+
+    @property
+    def semantic_visual_dir(self) -> Path:
+        return self.semantic_dir / "visual"
+
+    @property
+    def semantic_visual_pages_dir(self) -> Path:
+        return self.semantic_visual_dir / "pages"
+
+    @property
+    def semantic_visual_crops_dir(self) -> Path:
+        return self.semantic_visual_dir / "crops"
+
+    @property
+    def semantic_ocr_corrections_json(self) -> Path:
+        return self.semantic_dir / "ocr-corrections.json"
+
+    @property
+    def presentation_dir(self) -> Path:
+        return self.root / "presentation"
+
+    @property
+    def presentation_book_style_profile_json(self) -> Path:
+        return self.presentation_dir / "book-style-profile.json"
+
+    @property
+    def presentation_style_pages_json(self) -> Path:
+        return self.presentation_dir / "style-pages.json"
+
+    @property
+    def presentation_normalization_report_json(self) -> Path:
+        return self.presentation_dir / "normalization-report.json"
+
     def ensure_directories(self) -> None:
         """Create all job directory structure if not already present."""
         for directory in (
@@ -141,6 +229,8 @@ class JobPaths:
             self.validation_dir,
             self.qa_dir,
             self.logs_dir,
+            self.semantic_dir,
+            self.presentation_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 

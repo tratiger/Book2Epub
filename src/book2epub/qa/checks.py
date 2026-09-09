@@ -13,7 +13,11 @@ from book2epub.ir.models import (
     UnknownBlock,
 )
 from book2epub.package.models import PackagingResult
-from book2epub.qa.models import EvaluationMetrics, StructuralCheckResult
+from book2epub.qa.models import (
+    EvaluationMetrics,
+    PreservationLedgerEntry,
+    StructuralCheckResult,
+)
 from book2epub.render.models import RenderResult
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,8 @@ def run_structural_checks(
     book_ir: BookIR,
     render_result: RenderResult,
     packaging_result: PackagingResult,
+    preservation_ledger: list[PreservationLedgerEntry] | None = None,
+    is_semantic: bool = False,
 ) -> tuple[list[StructuralCheckResult], EvaluationMetrics]:
     """
     Execute deterministic reconciliation checks comparing authoritative middle.json,
@@ -96,22 +102,32 @@ def run_structural_checks(
 
     # Check 1: Content Loss Check
     meaningful_ir_count = len(book_ir.blocks) - ir_unknown_count
-    content_loss_passed = (
-        meaningful_ir_count >= source_meaningful_count * 0.7 or source_meaningful_count == 0
-    )
+    if is_semantic and preservation_ledger:
+        all_accounted = all(entry.disposition != "lost_error" for entry in preservation_ledger)
+        content_loss_passed = all_accounted
+        loss_details = (
+            f"100% disposition accounting across {len(preservation_ledger)} source evidence blocks."
+            if all_accounted
+            else "Content loss detected: unrepresented evidence blocks."
+        )
+    else:
+        content_loss_passed = (
+            meaningful_ir_count >= source_meaningful_count * 0.7 or source_meaningful_count == 0
+        )
+        loss_details = f"Mapped {meaningful_ir_count} blocks from {source_meaningful_count} source."
+
     checks.append(
         StructuralCheckResult(
             name="Content-Loss Check",
             passed=content_loss_passed,
             source_count=source_meaningful_count,
             target_count=meaningful_ir_count,
-            details=f"Mapped {meaningful_ir_count} blocks from {source_meaningful_count} source.",
+            details=loss_details,
         )
     )
 
     # Check 2: Math Reconciliation Check
     math_target_count = render_result.math_count
-    # Pass if target math encompasses source equations or fallbacks
     math_passed = (math_target_count >= ir_math_display) or (source_math_count == 0)
     checks.append(
         StructuralCheckResult(
@@ -124,14 +140,31 @@ def run_structural_checks(
     )
 
     # Check 3: Table Reconciliation Check
-    table_passed = render_result.table_count >= source_table_count
+    if is_semantic and preservation_ledger:
+        retyped_tables = sum(
+            1
+            for e in preservation_ledger
+            if e.source_kind == "table" and e.disposition == "preserved_retyped"
+        )
+        effective_tables = render_result.table_count + retyped_tables
+        table_passed = effective_tables >= source_table_count
+        table_details = (
+            f"Rendered {render_result.table_count} tables + {retyped_tables} justified semantic "
+            f"retypes (source: {source_table_count})."
+        )
+    else:
+        table_passed = render_result.table_count >= source_table_count
+        table_details = (
+            f"Rendered {render_result.table_count} tables (source: {source_table_count})."
+        )
+
     checks.append(
         StructuralCheckResult(
             name="Table Reconciliation Check",
             passed=table_passed,
             source_count=source_table_count,
             target_count=render_result.table_count,
-            details=f"Rendered {render_result.table_count} tables (source: {source_table_count}).",
+            details=table_details,
         )
     )
 
@@ -146,7 +179,6 @@ def run_structural_checks(
             details=f"Rendered {render_result.code_count} code (source: {source_code_count}).",
         )
     )
-
     # Check 5: Heading Hierarchy Check
     heading_passed = (
         all(1 <= (h.level or 1) <= 6 for h in ir_headings) and not heading_jumps_warning

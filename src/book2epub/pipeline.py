@@ -199,8 +199,107 @@ def run_conversion_m2(
     raw_ir = adapter.convert_middle_json(data)
     save_bookir(raw_ir, paths.ir_raw_json)
 
+    is_evidence_needed = (
+        cfg.semantic.enabled
+        or cfg.ocr_correction.mode != "off"
+        or cfg.presentation.mode == "infer"
+    )
+
+    if is_evidence_needed:
+        from book2epub.semantic.draft import build_semantic_draft
+        from book2epub.semantic.evidence import build_semantic_evidence
+        from book2epub.semantic.hashing import compute_file_sha256
+
+        mid_sha = compute_file_sha256(canonical_middle_json)
+        raw_ir_sha = compute_file_sha256(paths.ir_raw_json)
+
+        evidence_book = build_semantic_evidence(
+            middle_data=data,
+            raw_ir=raw_ir,
+            source_middle_sha256=mid_sha,
+            raw_bookir_sha256=raw_ir_sha,
+        )
+        paths.semantic_evidence_json.parent.mkdir(parents=True, exist_ok=True)
+        paths.semantic_evidence_json.write_text(
+            evidence_book.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+        draft_book = build_semantic_draft(
+            evidence_book=evidence_book,
+            book_id=paths.job_id,
+        )
+        paths.semantic_draft_json.write_text(
+            draft_book.model_dump_json(indent=2), encoding="utf-8"
+        )
+        logger.info(
+            "Saved semantic evidence (%d blocks) and draft to %s",
+            len(evidence_book.blocks),
+            paths.semantic_dir,
+        )
+
+    ocr_recommended_block_ids: set[str] = set()
+
+    if cfg.semantic.enabled:
+        from book2epub.semantic.stage import run_semantic_reconstruction
+
+        logger.info("[Semantic] Running two-pass document semantic reconstruction...")
+        semantic_result = run_semantic_reconstruction(
+            raw_ir=raw_ir,
+            evidence=evidence_book,
+            draft=draft_book,
+            cfg=cfg,
+            paths=paths,
+        )
+        semantic_ir = semantic_result.bookir
+        logger.info(
+            "[Semantic] Reconstruction complete: %d applied changes, %d preserved, %d conflicts",
+            semantic_result.applied_changes_count,
+            semantic_result.preserved_originals_count,
+            semantic_result.conflict_count,
+        )
+
+        # M9 Visual Arbitration (if vision is not off)
+        if cfg.semantic.vision != "off":
+            from book2epub.providers.factory import create_provider
+            from book2epub.visual.arbitration import run_visual_arbitration
+            from book2epub.visual.source import VisualSource
+
+            visual_source = VisualSource.resolve(cfg, paths=paths)
+            if visual_source.has_visual:
+                vis_provider = create_provider(cfg, purpose="visual")
+                semantic_ir, _, ocr_recommended_block_ids = run_visual_arbitration(
+                    bookir=semantic_ir,
+                    evidence=evidence_book,
+                    draft=draft_book,
+                    audits=semantic_result.audits,
+                    cfg=cfg,
+                    paths=paths,
+                    visual_source=visual_source,
+                    provider=vis_provider,
+                )
+                save_bookir(semantic_ir, paths.ir_semantic_json)
+    else:
+        semantic_ir = raw_ir
+
+    # M9 Multimodal OCR Correction (safe | all)
+    if cfg.ocr_correction.mode in ("safe", "all"):
+        from book2epub.visual.ocr_apply import run_ocr_correction
+        from book2epub.visual.source import VisualSource
+
+        visual_source = VisualSource.resolve(cfg, paths=paths)
+        corrected_ir, _ = run_ocr_correction(
+            bookir=semantic_ir,
+            evidence=evidence_book,
+            cfg=cfg,
+            paths=paths,
+            visual_source=visual_source,
+            ocr_recommended_block_ids=ocr_recommended_block_ids,
+        )
+    else:
+        corrected_ir = semantic_ir
+
     logger.info("Applying normalization (cross-page joins, page labels, layout hints)...")
-    normalized_ir = normalize_bookir(raw_ir, raw_page_number_texts=raw_page_number_texts)
+    normalized_ir = normalize_bookir(corrected_ir, raw_page_number_texts=raw_page_number_texts)
     save_bookir(normalized_ir, paths.ir_normalized_json)
 
     logger.info(
@@ -215,9 +314,10 @@ def run_conversion_m3(
     normalized_ir: BookIR,
     paths: JobPaths,
     cfg: JobConfig,
+    profile: Any | None = None,
 ) -> RenderResult:
     """
-    Execute M3 (Reflow XHTML / MathML renderer) pipeline.
+    Execute M3/M10 (Reflow XHTML / MathML renderer) pipeline.
 
     Writes unpacked publication tree to:
       render/OEBPS/
@@ -228,14 +328,43 @@ def run_conversion_m3(
 
     Returns RenderResult.
     """
-    logger.info("[Stage 4/6] Rendering BookIR to reflowable XHTML/MathML...")
+    render_ir = normalized_ir
+    if cfg.presentation.mode != "legacy":
+        if profile is None:
+            from book2epub.presentation.stage import resolve_style_profile
+
+            profile, _ = resolve_style_profile(normalized_ir, cfg, paths)
+
+        from book2epub.typography.normalize import typography_normalize_bookir
+        from book2epub.typography.report import save_normalization_report
+
+        logger.info(
+            "[Typography] Running whitespace and list normalization (mode=%s)...",
+            cfg.presentation.mode,
+        )
+        render_ir, norm_report = typography_normalize_bookir(normalized_ir, profile=profile)
+        save_bookir(render_ir, paths.ir_typography_json)
+        save_normalization_report(norm_report, paths.normalization_report_file)
+        logger.info(
+            "[Typography] Reconstructed %d text segments, %d markers extracted, %d dehyphenations",
+            norm_report.source_segment_reconstructions,
+            norm_report.list_markers_extracted,
+            norm_report.dehyphenations,
+        )
+
+    logger.info(
+        "[Stage 4/6] Rendering BookIR to reflowable XHTML/MathML (presentation=%s)...",
+        cfg.presentation.mode,
+    )
     renderer = ReflowRenderer(
         output_dir=paths.render_dir,
         cli_title=cfg.metadata.title,
         cli_language=cfg.metadata.language,
         cli_identifier=cfg.metadata.identifier,
+        presentation_config=cfg.presentation,
+        profile=profile,
     )
-    result = renderer.render(normalized_ir)
+    result = renderer.render(render_ir)
     logger.info(
         "=== Milestone M3 Complete: %d XHTML parts, %d math, %d figures, %d tables ===",
         result.xhtml_part_count,
@@ -300,6 +429,40 @@ def run_conversion_m5(
     with raw_middle_path.open("r", encoding="utf-8") as f:
         raw_middle_data = json.load(f)
 
+    evidence = None
+    if paths.semantic_evidence_json.is_file():
+        from book2epub.semantic.models import SemanticEvidenceBook
+
+        evidence = SemanticEvidenceBook.model_validate_json(
+            paths.semantic_evidence_json.read_text(encoding="utf-8")
+        )
+
+    audits = None
+    if paths.semantic_applied_json.is_file():
+        from book2epub.semantic.decisions import SemanticAuditRecord
+
+        applied_data = json.loads(paths.semantic_applied_json.read_text(encoding="utf-8"))
+        if isinstance(applied_data, list):
+            audits = [SemanticAuditRecord.model_validate(a) for a in applied_data]
+        elif isinstance(applied_data, dict):
+            audits = [SemanticAuditRecord.model_validate(a) for a in applied_data.get("audits", [])]
+
+    from book2epub.qa.ocr import evaluate_ocr_qa
+    from book2epub.qa.presentation import evaluate_presentation_qa
+    from book2epub.qa.semantic import (
+        build_preservation_ledger,
+        evaluate_semantic_transitions,
+    )
+
+    preservation_ledger = build_preservation_ledger(evidence, book_ir, audits)
+    semantic_metrics = evaluate_semantic_transitions(evidence, book_ir, audits)
+    ocr_metrics, _ = evaluate_ocr_qa(paths.semantic_ocr_corrections_json, cfg.ocr_correction.mode)
+    presentation_metrics, _ = evaluate_presentation_qa(
+        oebps_dir=paths.render_oebps_dir,
+        manifest=render_result.manifest,
+        mode=cfg.presentation.mode,
+    )
+
     qa_data = generate_qa_report(
         job_id=paths.job_id,
         raw_middle_data=raw_middle_data,
@@ -310,6 +473,10 @@ def run_conversion_m5(
         report_json_path=paths.qa_report_json,
         report_html_path=paths.qa_report_html,
         manifest_data=manifest_data,
+        preservation_ledger=preservation_ledger,
+        semantic_metrics=semantic_metrics,
+        ocr_metrics=ocr_metrics,
+        presentation_metrics=presentation_metrics,
     )
     packaging_result.qa_report_path = paths.qa_report_html
     logger.info("=== Milestone M5 Complete: QA report at %s ===", paths.qa_report_html)

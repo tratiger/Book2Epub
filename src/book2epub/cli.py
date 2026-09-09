@@ -6,7 +6,16 @@ from typing import Annotated
 import typer
 from rich.table import Table
 
-from book2epub.config import AppConfig, JobConfig, MetadataConfig, MinerUConfig, RenderConfig
+from book2epub.config import (
+    AppConfig,
+    JobConfig,
+    MetadataConfig,
+    MinerUConfig,
+    OCRCorrectionConfig,
+    PresentationConfig,
+    RenderConfig,
+    SemanticConfig,
+)
 from book2epub.doctor import print_doctor_report, run_doctor_checks
 from book2epub.logging import configure_logging, console, error_console
 from book2epub.mineru.inspect import print_inspect_report
@@ -62,10 +71,21 @@ def doctor(
             help="Path to .tools directory where epubcheck is installed.",
         ),
     ] = None,
+    semantic_provider: Annotated[
+        str | None,
+        typer.Option(
+            "--semantic-provider",
+            help="Check specific semantic provider environment/reachability (e.g. ollama).",
+        ),
+    ] = None,
 ) -> None:
     """Check system environment, GPU acceleration, and dependencies."""
     configure_logging(level="INFO")
-    results = run_doctor_checks(work_dir=work_dir, tools_dir=tools_dir)
+    results = run_doctor_checks(
+        work_dir=work_dir,
+        tools_dir=tools_dir,
+        semantic_provider=semantic_provider,
+    )
     success = print_doctor_report(results)
     if not success:
         error_console.print(
@@ -143,12 +163,83 @@ def convert(
             help="MinerU model source (local, huggingface, modelscope).",
         ),
     ] = "local",
+    semantic: Annotated[
+        bool,
+        typer.Option("--semantic/--no-semantic", help="Enable LLM semantic reconstruction."),
+    ] = False,
+    semantic_provider: Annotated[
+        str,
+        typer.Option(
+            "--semantic-provider",
+            help="Semantic provider backend (ollama, openai, google, anthropic).",
+        ),
+    ] = "ollama",
+    semantic_model: Annotated[
+        str | None,
+        typer.Option("--semantic-model", help="Semantic model override."),
+    ] = None,
+    semantic_vision: Annotated[
+        str,
+        typer.Option(
+            "--semantic-vision",
+            help="Visual review policy (off, auto, on).",
+        ),
+    ] = "auto",
+    allow_cloud: Annotated[
+        bool,
+        typer.Option("--allow-cloud", help="Allow external cloud provider API calls."),
+    ] = False,
+    ocr_correction: Annotated[
+        str,
+        typer.Option(
+            "--ocr-correction",
+            help="OCR correction mode (off, safe, all).",
+        ),
+    ] = "off",
+    presentation: Annotated[
+        str,
+        typer.Option(
+            "--presentation",
+            help="Presentation style mode (legacy, enhanced, infer).",
+        ),
+    ] = "legacy",
+    source_pdf: Annotated[
+        Path | None,
+        typer.Option(
+            "--source-pdf",
+            help="Explicit source PDF path for visual review/OCR.",
+        ),
+    ] = None,
+    source_images_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--source-images-dir",
+            help="Explicit source page images directory for visual review/OCR.",
+        ),
+    ] = None,
+    force_semantic: Annotated[
+        bool,
+        typer.Option("--force-semantic", help="Force re-running semantic reconstruction."),
+    ] = False,
+    force_visual: Annotated[
+        bool,
+        typer.Option("--force-visual", help="Force re-running visual arbitration and OCR."),
+    ] = False,
+    force_presentation: Annotated[
+        bool,
+        typer.Option("--force-presentation", help="Force re-running presentation style inference."),
+    ] = False,
 ) -> None:
     """Convert a directory of page images into a reflowable EPUB 3.3."""
     app_cfg = AppConfig(
         work_dir=work_dir,
         strict=strict,
         logging_level="DEBUG" if verbose else "INFO",
+        source_pdf=source_pdf,
+        source_images_dir=source_images_dir,
+        force_semantic=force_semantic,
+        force_visual=force_visual,
+        force_presentation=force_presentation,
     )
     mineru_cfg = MinerUConfig(
         model_source=mineru_model_source,  # type: ignore[arg-type]
@@ -161,11 +252,27 @@ def convert(
         publisher=publisher,
         cover_image=cover_image,
     )
+    semantic_cfg = SemanticConfig(
+        enabled=semantic,
+        provider=semantic_provider,  # type: ignore[arg-type]
+        model=semantic_model,
+        allow_cloud=allow_cloud,
+        vision=semantic_vision,  # type: ignore[arg-type]
+    )
+    ocr_cfg = OCRCorrectionConfig(
+        mode=ocr_correction,  # type: ignore[arg-type]
+    )
+    pres_cfg = PresentationConfig(
+        mode=presentation,  # type: ignore[arg-type]
+    )
     job_cfg = JobConfig(
         app=app_cfg,
         mineru=mineru_cfg,
         render=RenderConfig(language=language),
         metadata=meta_cfg,
+        semantic=semantic_cfg,
+        ocr_correction=ocr_cfg,
+        presentation=pres_cfg,
     )
 
     result = run_pipeline(
@@ -259,12 +366,68 @@ def from_middle(
         bool,
         typer.Option("-v", "--verbose", help="Enable verbose debug logging."),
     ] = False,
+    semantic: Annotated[
+        bool,
+        typer.Option("--semantic/--no-semantic", help="Enable LLM semantic reconstruction."),
+    ] = False,
+    semantic_provider: Annotated[
+        str,
+        typer.Option(
+            "--semantic-provider",
+            help="Semantic provider backend (ollama, openai, google, anthropic).",
+        ),
+    ] = "ollama",
+    semantic_model: Annotated[
+        str | None,
+        typer.Option("--semantic-model", help="Semantic model override."),
+    ] = None,
+    semantic_vision: Annotated[
+        str,
+        typer.Option(
+            "--semantic-vision",
+            help="Visual review policy (off, auto, on).",
+        ),
+    ] = "auto",
+    allow_cloud: Annotated[
+        bool,
+        typer.Option("--allow-cloud", help="Allow external cloud provider API calls."),
+    ] = False,
+    ocr_correction: Annotated[
+        str,
+        typer.Option(
+            "--ocr-correction",
+            help="OCR correction mode (off, safe, all).",
+        ),
+    ] = "off",
+    presentation: Annotated[
+        str,
+        typer.Option(
+            "--presentation",
+            help="Presentation style mode (legacy, enhanced, infer).",
+        ),
+    ] = "legacy",
+    source_pdf: Annotated[
+        Path | None,
+        typer.Option(
+            "--source-pdf",
+            help="Explicit source PDF path for visual review/OCR.",
+        ),
+    ] = None,
+    source_images_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--source-images-dir",
+            help="Explicit source page images directory for visual review/OCR.",
+        ),
+    ] = None,
 ) -> None:
     """Render EPUB directly from an existing MinerU middle.json without running OCR."""
     app_cfg = AppConfig(
         work_dir=work_dir,
         strict=strict,
         logging_level="DEBUG" if verbose else "INFO",
+        source_pdf=source_pdf,
+        source_images_dir=source_images_dir,
     )
     meta_cfg = MetadataConfig(
         title=title,
@@ -274,10 +437,26 @@ def from_middle(
         publisher=publisher,
         cover_image=cover_image,
     )
+    semantic_cfg = SemanticConfig(
+        enabled=semantic,
+        provider=semantic_provider,  # type: ignore[arg-type]
+        model=semantic_model,
+        allow_cloud=allow_cloud,
+        vision=semantic_vision,  # type: ignore[arg-type]
+    )
+    ocr_cfg = OCRCorrectionConfig(
+        mode=ocr_correction,  # type: ignore[arg-type]
+    )
+    pres_cfg = PresentationConfig(
+        mode=presentation,  # type: ignore[arg-type]
+    )
     job_cfg = JobConfig(
         app=app_cfg,
         render=RenderConfig(language=language),
         metadata=meta_cfg,
+        semantic=semantic_cfg,
+        ocr_correction=ocr_cfg,
+        presentation=pres_cfg,
     )
 
     result = run_from_middle(
@@ -414,6 +593,73 @@ def evaluate(
     table.add_row("EPUBCheck Warnings", str(metrics.get("epubcheck_warning_count", 0)))
 
     console.print(table)
+
+    sem = data.get("semantic_metrics")
+    if sem:
+        sem_tbl = Table(title="Semantic Reconstruction Metrics", show_header=False)
+        sem_tbl.add_column("Metric", style="bold cyan")
+        sem_tbl.add_column("Value", style="white")
+        sem_tbl.add_row("Semantic Change Rate", f"{sem.get('semantic_change_rate', 0) * 100:.2f}%")
+        sem_tbl.add_row("Auto-Apply Rate", f"{sem.get('semantic_auto_apply_rate', 0) * 100:.2f}%")
+        sem_tbl.add_row("Conflict Rate", f"{sem.get('semantic_conflict_rate', 0) * 100:.2f}%")
+        transitions = sem.get("type_transitions", {})
+        if transitions:
+            sem_tbl.add_row("Transitions", ", ".join(f"{k}: {v}" for k, v in transitions.items()))
+        console.print()
+        console.print(sem_tbl)
+
+    pres = data.get("presentation_metrics")
+    if pres:
+        pres_tbl = Table(title="Presentation & Typography Metrics", show_header=False)
+        pres_tbl.add_column("Metric", style="bold cyan")
+        pres_tbl.add_column("Value", style="white")
+        pres_tbl.add_row("Presentation Mode", str(pres.get("presentation_mode", "legacy")))
+        pres_tbl.add_row("Duplicate List Markers", str(pres.get("list_duplicate_marker_count", 0)))
+        comp_counts = pres.get("component_counts", {})
+        if comp_counts:
+            pres_tbl.add_row("Total Components", str(sum(comp_counts.values())))
+        console.print()
+        console.print(pres_tbl)
+
+
+@app.command()
+def compare(
+    job_a: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to first job workspace directory.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+        ),
+    ],
+    job_b: Annotated[
+        Path,
+        typer.Argument(
+            help="Path to second job workspace directory.",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            readable=True,
+        ),
+    ],
+) -> None:
+    """Compare QA reports between two conversion jobs (M12 Section 15)."""
+    report_a = job_a / "qa" / "report.json"
+    report_b = job_b / "qa" / "report.json"
+
+    if not report_a.is_file():
+        error_console.print(f"[bold red]QA report not found at {report_a}[/bold red]")
+        raise typer.Exit(code=1)
+    if not report_b.is_file():
+        error_console.print(f"[bold red]QA report not found at {report_b}[/bold red]")
+        raise typer.Exit(code=1)
+
+    from book2epub.qa.compare import compare_qa_reports, format_comparison_text
+
+    diff = compare_qa_reports(report_a, report_b)
+    console.print(format_comparison_text(diff))
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 """Adapter converting MinerU middle.json into BookIR models."""
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any, Literal
@@ -27,6 +28,7 @@ from book2epub.ir.models import (
     SourceDocument,
     SourcePage,
     SourceRef,
+    SourceTextSegment,
     Table,
     Text,
     UnknownBlock,
@@ -127,24 +129,35 @@ class MiddleJsonAdapter:
             raw_extensions=raw_ext,
         )
 
-    def extract_inlines(self, block: dict[str, Any], page_idx: int) -> list[Inline]:
+    def extract_inlines(
+        self, block: dict[str, Any], page_idx: int, block_id: str = ""
+    ) -> list[Inline]:
         """Extract inline nodes (Text, InlineMath) from a block's lines and spans."""
         inlines: list[Inline] = []
         text_accumulator: list[str] = []
         pending_sources: list[SourceRef] = []
+        pending_segments: list[SourceTextSegment] = []
 
         def flush_text() -> None:
-            nonlocal text_accumulator, pending_sources
+            nonlocal text_accumulator, pending_sources, pending_segments
             if text_accumulator:
                 joined = join_prose_texts(text_accumulator)
                 if joined:
-                    inlines.append(Text(text=joined, sources=list(pending_sources)))
+                    inlines.append(
+                        Text(
+                            text=joined,
+                            sources=list(pending_sources),
+                            source_segments=list(pending_segments),
+                        )
+                    )
                 text_accumulator = []
                 pending_sources = []
+                pending_segments = []
 
-        for line in block.get("lines", []):
+        is_first_span = True
+        for line_idx, line in enumerate(block.get("lines", [])):
             line_box = parse_bbox(line.get("bbox"))
-            for span in line.get("spans", []):
+            for span_idx, span in enumerate(line.get("spans", [])):
                 stype = span.get("type", "text")
                 span_box = parse_bbox(span.get("bbox")) or line_box
                 s_ref = SourceRef(
@@ -160,17 +173,39 @@ class MiddleJsonAdapter:
                     if latex.startswith("$") and latex.endswith("$") and len(latex) >= 2:
                         latex = latex[1:-1].strip()
                     inlines.append(InlineMath(latex=latex, sources=[s_ref]))
-                elif stype == "text":
-                    content = span.get("content", "")
-                    if content:
-                        text_accumulator.append(content)
-                        pending_sources.append(s_ref)
+                    is_first_span = False
                 else:
-                    # Generic span content
                     content = span.get("content", "")
                     if content:
+                        boundary_before: Literal[
+                            "start", "same_line", "new_line", "page_continuation", "unknown"
+                        ]
+                        if is_first_span:
+                            boundary_before = "start"
+                        elif span_idx == 0:
+                            boundary_before = "new_line"
+                        else:
+                            boundary_before = "same_line"
+
+                        prefix = block_id if block_id else "blk"
+                        seg_id = f"{prefix}-p{page_idx:03d}-l{line_idx:03d}-s{span_idx:03d}"
+                        seg_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                        seg = SourceTextSegment(
+                            segment_id=seg_id,
+                            page_idx=page_idx,
+                            block_id=block_id or prefix,
+                            line_index=line_idx,
+                            span_index=span_idx,
+                            text=content,
+                            bbox=span_box,
+                            boundary_before=boundary_before,
+                            source_span_type=stype,
+                            text_sha256=seg_hash,
+                        )
                         text_accumulator.append(content)
                         pending_sources.append(s_ref)
+                        pending_segments.append(seg)
+                        is_first_span = False
 
         flush_text()
         return inlines
@@ -224,11 +259,11 @@ class MiddleJsonAdapter:
                         hl = level
                     else:
                         hl = None
-                    inlines = self.extract_inlines(block, page_idx)
+                    inlines = self.extract_inlines(block, page_idx, block_id=b_id)
                     page_blocks.append(Heading(id=b_id, level=hl, inlines=inlines, sources=[s_ref]))
 
                 elif b_type == "text":
-                    inlines = self.extract_inlines(block, page_idx)
+                    inlines = self.extract_inlines(block, page_idx, block_id=b_id)
                     if inlines:
                         page_blocks.append(Paragraph(id=b_id, inlines=inlines, sources=[s_ref]))
 

@@ -79,6 +79,23 @@ class Asset(BaseModel):
         return self.source_path
 
 
+class SourceTextSegment(BaseModel):
+    """Authoritative source text segment for OCR correction and spacing normalization."""
+
+    segment_id: str
+    page_idx: int
+    block_id: str
+    line_index: int | None = None
+    span_index: int | None = None
+    text: str
+    bbox: BBox | None = None
+    boundary_before: Literal[
+        "start", "same_line", "new_line", "page_continuation", "unknown"
+    ] = "unknown"
+    source_span_type: str | None = None
+    text_sha256: str
+
+
 class InlineBase(BaseModel):
     """Base class for all inline nodes."""
 
@@ -88,6 +105,8 @@ class InlineBase(BaseModel):
 class Text(InlineBase):
     kind: Literal["text"] = "text"
     text: str
+    source_segments: list[SourceTextSegment] = Field(default_factory=list)
+
 
 
 class InlineMath(InlineBase):
@@ -182,11 +201,71 @@ class DisplayMath(BlockBase):
     mathml: str | None = None
 
 
+PreformattedSubtype = Literal[
+    "source_code",
+    "shell_command",
+    "terminal_output",
+    "terminal_session",
+    "repl_session",
+    "log_output",
+    "config_file",
+    "generic_preformatted",
+]
+
+
+class PreformattedBlock(BlockBase):
+    kind: Literal["preformatted"] = "preformatted"
+    subtype: PreformattedSubtype
+    text: str
+    language: str | None = None
+    caption: list[Inline] = Field(default_factory=list)
+    footnotes: list[Inline] = Field(default_factory=list)
+
+
+class Callout(BlockBase):
+    kind: Literal["callout"] = "callout"
+    subtype: Literal["note", "tip", "warning", "caution", "important", "sidebar"]
+    title: list[Inline] = Field(default_factory=list)
+    blocks: list["Block"] = Field(default_factory=list)
+
+
+class BlockQuote(BlockBase):
+    kind: Literal["block_quote"] = "block_quote"
+    blocks: list["Block"] = Field(default_factory=list)
+    attribution: list[Inline] = Field(default_factory=list)
+
+
+class DefinitionItem(BaseModel):
+    term: list[Inline]
+    definitions: list[list[Inline]] = Field(default_factory=list)
+
+
+class DefinitionList(BlockBase):
+    kind: Literal["definition_list"] = "definition_list"
+    items: list[DefinitionItem] = Field(default_factory=list)
+
+
+class ExampleBlock(BlockBase):
+    kind: Literal["example"] = "example"
+    label: list[Inline] = Field(default_factory=list)
+    blocks: list["Block"] = Field(default_factory=list)
+
+
+class ExerciseBlock(BlockBase):
+    kind: Literal["exercise"] = "exercise"
+    label: list[Inline] = Field(default_factory=list)
+    blocks: list["Block"] = Field(default_factory=list)
+
+
 class ListBlock(BlockBase):
     kind: Literal["list"] = "list"
     ordered: bool | None = None
     items: list[list[Inline]] = Field(default_factory=list)
     subtype: str | None = None
+    marker_style: Literal[
+        "auto", "disc", "circle", "square", "decimal", "alpha", "roman", "dash", "none"
+    ] = "auto"
+    source_markers: list[str | None] = Field(default_factory=list)
 
 
 class Aside(BlockBase):
@@ -227,6 +306,12 @@ Block = Annotated[
         | Chart
         | Table
         | CodeBlock
+        | PreformattedBlock
+        | Callout
+        | BlockQuote
+        | DefinitionList
+        | ExampleBlock
+        | ExerciseBlock
         | DisplayMath
         | ListBlock
         | Aside
@@ -284,9 +369,14 @@ class IRWarning(BaseModel):
 class BookIR(BaseModel):
     """Root model for Book2Epub Intermediate Representation."""
 
-    schema_version: str = "1.0"
+    schema_version: str = "1.1"
     source: SourceDocument
     metadata: BookMetadata = Field(default_factory=BookMetadata)
     blocks: list[Block] = Field(default_factory=list)
     assets: dict[str, Asset] = Field(default_factory=dict)
     warnings: list[IRWarning] = Field(default_factory=list)
+    outline: Any | None = None
+    book_state: Any | None = None
+    semantic_metadata: Any | None = None
+    presentation_profile: Any | None = None
+

@@ -20,6 +20,7 @@ class CheckStatus(StrEnum):
     PASS = "PASS"
     WARN = "WARN"
     FAIL = "FAIL"
+    INFO = "INFO"
 
 
 @dataclass(frozen=True)
@@ -293,9 +294,100 @@ def check_mineru_model_source() -> CheckResult:
     )
 
 
+def check_provider_sdks() -> list[CheckResult]:
+    """Check installed versions of optional provider SDKs."""
+    import importlib.metadata
+
+    packages = [
+        ("ollama", "semantic-local"),
+        ("openai", "semantic-openai"),
+        ("google-genai", "semantic-google"),
+        ("anthropic", "semantic-anthropic"),
+    ]
+    results: list[CheckResult] = []
+    for pkg, extra in packages:
+        try:
+            ver = importlib.metadata.version(pkg)
+            results.append(
+                CheckResult(
+                    f"Provider SDK ({pkg})",
+                    CheckStatus.PASS,
+                    f"Installed version {ver}",
+                )
+            )
+        except importlib.metadata.PackageNotFoundError:
+            results.append(
+                CheckResult(
+                    f"Provider SDK ({pkg})",
+                    CheckStatus.INFO,
+                    f"Not installed (optional; install with: uv sync --extra {extra})",
+                )
+            )
+    return results
+
+
+def check_provider_env_keys() -> list[CheckResult]:
+    """Check presence of provider API keys (SET / NOT SET, never printing value)."""
+    env_keys = [
+        ("OPENAI_API_KEY", "Required for OpenAI cloud provider (--allow-cloud)"),
+        ("GEMINI_API_KEY", "Required for Google Gemini cloud provider (--allow-cloud)"),
+        ("ANTHROPIC_API_KEY", "Required for Anthropic cloud provider (--allow-cloud)"),
+        ("BOOK2EPUB_OLLAMA_HOST", "Optional host for Ollama (default http://localhost:11434)"),
+    ]
+    results: list[CheckResult] = []
+    for key, desc in env_keys:
+        val = os.environ.get(key)
+        if val is not None and val.strip():
+            results.append(
+                CheckResult(
+                    f"Provider Env ({key})",
+                    CheckStatus.PASS,
+                    "SET",
+                )
+            )
+        else:
+            results.append(
+                CheckResult(
+                    f"Provider Env ({key})",
+                    CheckStatus.INFO,
+                    f"NOT SET ({desc})",
+                )
+            )
+    return results
+
+
+def check_ollama_reachable() -> CheckResult:
+    """Check if Ollama host is reachable (only executed if explicitly asked)."""
+    import urllib.request
+
+    host = os.environ.get("BOOK2EPUB_OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    try:
+        req = urllib.request.Request(f"{host}/api/tags", headers={"User-Agent": "Book2Epub-Doctor"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                return CheckResult(
+                    "Ollama Host Reachability",
+                    CheckStatus.PASS,
+                    f"Reachable at {host}",
+                )
+            return CheckResult(
+                "Ollama Host Reachability",
+                CheckStatus.WARN,
+                f"Responded with HTTP {resp.status} at {host}",
+            )
+    except Exception as exc:
+        return CheckResult(
+            "Ollama Host Reachability",
+            CheckStatus.WARN,
+            f"Cannot connect to {host}: {exc}",
+            recommendation="Start Ollama service: ollama serve",
+        )
+
+
 def run_doctor_checks(
     work_dir: Path = Path(".work"),
     tools_dir: Path | None = None,
+    semantic_provider: str | None = None,
 ) -> list[CheckResult]:
     """Execute all diagnostic checks and return a list of CheckResults."""
     results: list[CheckResult] = []
@@ -318,6 +410,12 @@ def run_doctor_checks(
     results.append(check_work_dir_writable(work_dir))
     results.append(check_mineru_model_source())
 
+    # Provider diagnostic checks (optional, non-failing)
+    results.extend(check_provider_sdks())
+    results.extend(check_provider_env_keys())
+    if semantic_provider == "ollama":
+        results.append(check_ollama_reachable())
+
     return results
 
 
@@ -334,6 +432,8 @@ def print_doctor_report(results: list[CheckResult]) -> bool:
             status_str = "[bold green]PASS[/bold green]"
         elif res.status == CheckStatus.WARN:
             status_str = "[bold yellow]WARN[/bold yellow]"
+        elif res.status == CheckStatus.INFO:
+            status_str = "[bold blue]INFO[/bold blue]"
         else:
             status_str = "[bold red]FAIL[/bold red]"
             has_fail = True

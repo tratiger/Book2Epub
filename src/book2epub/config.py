@@ -14,6 +14,19 @@ class AppConfig(BaseModel):
         default=True, description="Fail on warnings originating from generated markup"
     )
     logging_level: str = Field(default="INFO", description="Logging level")
+    source_pdf: Path | None = Field(default=None, description="Explicit source PDF path")
+    source_images_dir: Path | None = Field(
+        default=None, description="Explicit source page images directory"
+    )
+    force_semantic: bool = Field(
+        default=False, description="Force re-running semantic reconstruction"
+    )
+    force_visual: bool = Field(
+        default=False, description="Force re-running visual arbitration and OCR"
+    )
+    force_presentation: bool = Field(
+        default=False, description="Force re-running presentation style inference"
+    )
 
     @field_validator("logging_level")
     @classmethod
@@ -87,6 +100,53 @@ class MetadataConfig(BaseModel):
     cover_image: Path | None = Field(default=None, description="Explicit cover image path")
 
 
+class SemanticConfig(BaseModel):
+    """Configuration for LLM-based semantic document reconstruction (M6-M8)."""
+
+    enabled: bool = Field(default=False, description="Enable semantic reconstruction")
+    provider: Literal["ollama", "openai", "google", "anthropic"] = Field(
+        default="ollama", description="Semantic provider backend"
+    )
+    model: str | None = Field(default=None, description="Model identifier override")
+    allow_cloud: bool = Field(
+        default=False, description="Explicit opt-in required for cloud provider requests"
+    )
+    vision: Literal["off", "auto", "on"] = Field(
+        default="auto", description="Multimodal visual review policy"
+    )
+    auto_apply_threshold: float = Field(
+        default=0.80, ge=0.0, le=1.0, description="Confidence threshold for automatic application"
+    )
+    review_floor: float = Field(
+        default=0.45, ge=0.0, le=1.0, description="Minimum confidence to queue for visual review"
+    )
+    max_chunk_chars: int = Field(
+        default=24_000, ge=1_000, description="Maximum characters per semantic chunk"
+    )
+    max_chunk_blocks: int = Field(
+        default=60, ge=5, description="Maximum blocks per semantic chunk"
+    )
+    overlap_blocks: int = Field(
+        default=8, ge=0, description="Context overlap blocks between chunks"
+    )
+
+
+class OCRCorrectionConfig(BaseModel):
+    """Configuration for visual-evidence-gated OCR correction (M9)."""
+
+    mode: Literal["off", "safe", "all"] = Field(
+        default="off", description="OCR correction mode (default off)"
+    )
+
+
+class PresentationConfig(BaseModel):
+    """Configuration for EPUB styling and presentation (M10)."""
+
+    mode: Literal["legacy", "enhanced", "infer"] = Field(
+        default="legacy", description="Presentation mode (default legacy)"
+    )
+
+
 class JobConfig(BaseModel):
     """Composite configuration for a single Book2Epub execution."""
 
@@ -94,3 +154,7 @@ class JobConfig(BaseModel):
     mineru: MinerUConfig = Field(default_factory=MinerUConfig)
     render: RenderConfig = Field(default_factory=RenderConfig)
     metadata: MetadataConfig = Field(default_factory=MetadataConfig)
+    semantic: SemanticConfig = Field(default_factory=SemanticConfig)
+    ocr_correction: OCRCorrectionConfig = Field(default_factory=OCRCorrectionConfig)
+    presentation: PresentationConfig = Field(default_factory=PresentationConfig)
+
