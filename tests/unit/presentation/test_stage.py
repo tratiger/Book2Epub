@@ -32,7 +32,7 @@ def test_presentation_infer_cache_crosses_job_paths_and_force_reloads(
     def fake_infer(**kwargs):
         nonlocal calls
         calls += 1
-        return DEFAULT_ENHANCED_PROFILE, []
+        return DEFAULT_ENHANCED_PROFILE.model_copy(update={"mode_source": "inferred"}), []
 
     monkeypatch.setattr(
         "book2epub.visual.source.VisualSource.resolve",
@@ -56,4 +56,41 @@ def test_presentation_infer_cache_crosses_job_paths_and_force_reloads(
     forced_cfg.app.force_presentation = True
     forced_paths = create_job_paths(cfg.app.work_dir, job_id="job-c")
     resolve_style_profile(bookir, forced_cfg, forced_paths)
+    assert calls == 2
+
+
+def test_presentation_fallback_is_not_cached_across_runs(tmp_path: Path, monkeypatch) -> None:
+    cfg = JobConfig(
+        app={"work_dir": tmp_path / ".work"},
+        presentation={"mode": "infer"},
+    )
+    bookir = BookIR(source=SourceDocument(page_count=1))
+    calls = 0
+
+    def fake_infer(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return DEFAULT_ENHANCED_PROFILE, ["STYLE_INFERENCE_FALLBACK"]
+        return DEFAULT_ENHANCED_PROFILE.model_copy(update={"mode_source": "inferred"}), []
+
+    monkeypatch.setattr(
+        "book2epub.visual.source.VisualSource.resolve",
+        lambda cfg, paths: _FakeVisualSource(),
+    )
+    monkeypatch.setattr(
+        "book2epub.providers.factory.create_provider",
+        lambda cfg, purpose: _FakeProvider(),
+    )
+    monkeypatch.setattr("book2epub.presentation.stage.infer_style_profile", fake_infer)
+
+    first_paths = create_job_paths(cfg.app.work_dir, job_id="job-a")
+    second_paths = create_job_paths(cfg.app.work_dir, job_id="job-b")
+    _, first_warnings = resolve_style_profile(bookir, cfg, first_paths)
+    cache_root = cfg.app.work_dir / "cache" / "presentation"
+    assert not cache_root.exists() or not list(cache_root.rglob("*"))
+    _, second_warnings = resolve_style_profile(bookir, cfg, second_paths)
+
+    assert first_warnings == ["STYLE_INFERENCE_FALLBACK"]
+    assert second_warnings == []
     assert calls == 2

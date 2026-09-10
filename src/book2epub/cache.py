@@ -166,15 +166,27 @@ def compute_presentation_cache_key(
     )
 
 
-def stage_cache_hit(stage_file: Path, cache_key: str, outputs: Iterable[Path]) -> bool:
-    """Return true only for a completed matching record with all outputs present."""
+def stage_cache_hit(
+    stage_file: Path,
+    cache_key: str,
+    outputs: Iterable[Path],
+    *,
+    require_cacheable: bool = False,
+) -> bool:
+    """Return true only for a matching, optionally cacheable stage record."""
     if not stage_file.is_file() or any(not path.is_file() for path in outputs):
         return False
     try:
         data = json.loads(stage_file.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return data.get("state") in {"complete", "cache_hit"} and data.get("cache_key") == cache_key
+    if data.get("state") not in {"complete", "cache_hit"}:
+        return False
+    if data.get("cache_key") != cache_key:
+        return False
+    if require_cacheable and data.get("details", {}).get("cacheable") is not True:
+        return False
+    return True
 
 
 def materialize_global_stage_cache(

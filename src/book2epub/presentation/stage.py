@@ -106,15 +106,30 @@ def resolve_style_profile(
         }
         presentation_cache_hit = False
         if not cfg.app.force_presentation:
-            presentation_cache_hit = materialize_global_stage_cache(
+            materialized = materialize_global_stage_cache(
                 cfg.app.work_dir,
                 "presentation",
                 presentation_key,
                 presentation_cache_artifacts,
-            ) or stage_cache_hit(
+            )
+            if materialized:
+                try:
+                    presentation_cache_hit = (
+                        BookStyleProfile.model_validate_json(
+                            paths.presentation_book_style_profile_json.read_text(
+                                encoding="utf-8"
+                            )
+                        ).mode_source
+                        == "inferred"
+                    )
+                except Exception:
+                    presentation_cache_hit = False
+            if not presentation_cache_hit:
+                presentation_cache_hit = stage_cache_hit(
                 paths.presentation_stage_json,
                 presentation_key,
                 (paths.presentation_book_style_profile_json,),
+                require_cacheable=True,
             )
         if presentation_cache_hit:
             profile = BookStyleProfile.model_validate_json(
@@ -157,13 +172,6 @@ def resolve_style_profile(
             warnings.append("STYLE_INFERENCE_FALLBACK")
             profile = DEFAULT_ENHANCED_PROFILE
         else:
-            # Write style-pages.json
-            style_pages_file = paths.presentation_dir / "style-pages.json"
-            style_pages_file.write_text(
-                json.dumps({"representative_pages": rep_pages}, indent=2),
-                encoding="utf-8",
-            )
-
             try:
                 assert provider is not None
                 profile, infer_warnings = infer_style_profile(
@@ -180,6 +188,17 @@ def resolve_style_profile(
                 warnings.append("STYLE_INFERENCE_FALLBACK")
                 profile = DEFAULT_ENHANCED_PROFILE
 
+        # Keep the evidence artifact aligned with the pages actually attached by
+        # infer_style_profile. A fallback has no inferred evidence to publish.
+        style_pages_file = paths.presentation_dir / "style-pages.json"
+        style_pages_file.write_text(
+            json.dumps(
+                {"representative_pages": profile.representative_page_indices}, indent=2
+            ),
+            encoding="utf-8",
+        )
+        cacheable = profile.mode_source == "inferred" and not warnings
+
         # Save profile
         paths.presentation_book_style_profile_json.write_text(
             profile.model_dump_json(indent=2),
@@ -194,14 +213,20 @@ def resolve_style_profile(
             provider=provider_name or None,
             model=provider_model or None,
             output_artifact=str(paths.presentation_book_style_profile_json),
-            reason="presentation profile complete",
+            reason=(
+                "presentation profile complete"
+                if cacheable
+                else "presentation fallback complete; cache not persisted"
+            ),
+            details={"cacheable": cacheable},
         )
-        persist_global_stage_cache(
-            cfg.app.work_dir,
-            "presentation",
-            presentation_key,
-            presentation_cache_artifacts,
-        )
+        if cacheable:
+            persist_global_stage_cache(
+                cfg.app.work_dir,
+                "presentation",
+                presentation_key,
+                presentation_cache_artifacts,
+            )
         return profile, warnings
 
     return None, []

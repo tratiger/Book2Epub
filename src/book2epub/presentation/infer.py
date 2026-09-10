@@ -62,6 +62,7 @@ def infer_style_profile(
     # 2. Rasterize representative pages (longest edge <= 1600 px)
     raster_cache = PageRasterCache(paths.semantic_visual_pages_dir, visual_source)
     image_inputs: list[ImageInput] = []
+    attached_page_indices: list[int] = []
 
     for pidx in rep_pages:
         try:
@@ -73,6 +74,7 @@ def infer_style_profile(
                     label=f"Page {pidx + 1}",
                 )
             )
+            attached_page_indices.append(pidx)
         except Exception as exc:
             logger.warning("Failed to rasterize representative page %d: %s", pidx, exc)
 
@@ -85,7 +87,7 @@ def infer_style_profile(
     req_id = f"style-infer-{paths.job_id}"
     user_prompt = STYLE_INFERENCE_USER_PROMPT.format(
         page_count=len(image_inputs),
-        page_indices=rep_pages,
+        page_indices=attached_page_indices,
     )
 
     req = StructuredInferenceRequest(
@@ -133,7 +135,7 @@ def infer_style_profile(
         return DEFAULT_ENHANCED_PROFILE, warning_codes
 
     # Verify returned page indices are valid subset
-    valid_indices = set(rep_pages)
+    valid_indices = set(attached_page_indices)
     for idx in decision.evidence_page_indices:
         if idx not in valid_indices:
             logger.warning("Style inference returned unprovided page index %d. Rejecting.", idx)
@@ -148,7 +150,7 @@ def infer_style_profile(
             "model": provider.model,
             "request_id": req_id,
             "confidence": decision.confidence,
-            "representative_page_indices": rep_pages,
+            "representative_page_indices": attached_page_indices,
         }
     )
 
