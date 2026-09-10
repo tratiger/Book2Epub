@@ -22,6 +22,7 @@ from book2epub.ir.models import (
     Figure,
     Footnote,
     Heading,
+    Inline,
     ListBlock,
     Paragraph,
     PreformattedBlock,
@@ -46,6 +47,57 @@ from book2epub.typography.models import CharClass
 from book2epub.visual.models import OCRAuditRecord
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_ocr_to_inline_snapshot(
+    snapshot: list[dict[str, Any]],
+    applied_ocr: dict[tuple[str, str], str],
+    block_id: str,
+) -> str:
+    """
+    Deserialize a caption/footnote inline snapshot, apply OCR text replacements to
+    Text nodes (matching by block_id + segment_id), then extract visible text including
+    InlineMath latex, LineBreak newlines, and Hyperlink children.
+
+    This preserves non-Text inline content (InlineMath, LineBreak, Hyperlink) that
+    reconstruct_text_from_source_segments() would silently drop.
+
+    Text.text in the snapshot is the adapter-normalized (join_prose_texts-stripped) value.
+    When no OCR replacement applies to a Text node, keep Text.text unchanged so that
+    expected and actual both use the same stripped representation.
+    When an OCR replacement applies, rebuild Text.text via join_prose_texts to stay
+    consistent with adapter normalization.
+    """
+    from pydantic import TypeAdapter
+
+    from book2epub.ir.text_join import join_prose_texts
+
+    _inline_adapter: TypeAdapter[Inline] = TypeAdapter(Inline)
+    updated_inlines: list[Inline] = []
+    for d in snapshot:
+        try:
+            inl = _inline_adapter.validate_python(d)
+        except Exception:
+            continue
+        if isinstance(inl, Text) and inl.source_segments:
+            replaced_ids = {
+                s.segment_id
+                for s in inl.source_segments
+                if (block_id, s.segment_id) in applied_ocr
+            }
+            if replaced_ids:
+                # OCR was applied: rebuild from segment texts using same normalization
+                new_segs = [
+                    s.model_copy(update={"text": applied_ocr[(block_id, s.segment_id)]})
+                    if (block_id, s.segment_id) in applied_ocr
+                    else s
+                    for s in inl.source_segments
+                ]
+                new_text = join_prose_texts([s.text for s in new_segs])
+                inl = inl.model_copy(update={"text": new_text, "source_segments": new_segs})
+            # else: keep inl.text as-is (adapter-normalized, matches actual extraction)
+        updated_inlines.append(inl)
+    return extract_inline_visible_text(updated_inlines)
 
 _CJK_CLASSES = frozenset({
     CharClass.CJK_HAN_KANA,
@@ -633,7 +685,13 @@ def evaluate_preservation_qa(
                 for s in (ev.source_segments or [])
                 if s.source_span_type == "footnote" or "fn" in s.segment_id.lower()
             ]
-            if fn_segs:
+            if ev.footnote_inlines_snapshot:
+                # Preferred path: apply OCR replacements to the full inline structure
+                # (preserves InlineMath, LineBreak, Hyperlink that segments miss)
+                expected_fn = _apply_ocr_to_inline_snapshot(
+                    ev.footnote_inlines_snapshot, applied_ocr, ev.block_id
+                )
+            elif fn_segs:
                 eff_fn_segs = [
                     s.model_copy(update={"text": applied_ocr[(ev.block_id, s.segment_id)]})
                     if (ev.block_id, s.segment_id) in applied_ocr
@@ -715,7 +773,13 @@ def evaluate_preservation_qa(
                 for s in (ev.source_segments or [])
                 if s.source_span_type == "caption" or "caption" in s.segment_id.lower()
             ]
-            if cap_segs:
+            if ev.caption_inlines_snapshot:
+                # Preferred path: apply OCR replacements to the full inline structure
+                # (preserves InlineMath, LineBreak, Hyperlink that segments miss)
+                expected_cap = _apply_ocr_to_inline_snapshot(
+                    ev.caption_inlines_snapshot, applied_ocr, ev.block_id
+                )
+            elif cap_segs:
                 eff_cap_segs = [
                     s.model_copy(update={"text": applied_ocr[(ev.block_id, s.segment_id)]})
                     if (ev.block_id, s.segment_id) in applied_ocr

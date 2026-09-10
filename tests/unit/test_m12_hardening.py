@@ -1586,4 +1586,380 @@ def test_ai_caption_with_inlinemath_hyperlink_passes_preservation() -> None:
     assert len(violations) == 0, f"Unexpected violations: {violations}"
 
 
+def test_aj_caption_text_inlinemath_text_no_ocr_passes_preservation(
+    tmp_path: Path,
+) -> None:
+    """Test AJ: Caption with Text+InlineMath+Text, no OCR change: Preservation PASS.
+
+    This is the production case where reconstruct_text_from_source_segments() would drop
+    the InlineMath portion — the inline snapshot path must be used instead.
+    """
+    from book2epub.ir.adapter import MiddleJsonAdapter
+    from book2epub.ir.models import InlineMath
+    from book2epub.semantic.evidence import build_semantic_evidence
+
+    # Build a realistic BookIR via adapter so SourceTextSegments are attached to Text nodes
+    raw_data = {
+        "_version_name": "3.4.5",
+        "_backend": "hybrid",
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [
+                    {
+                        "type": "image",
+                        "blocks": [
+                            {
+                                "type": "image_caption",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "Graph of ",
+                                                "bbox": [10, 10, 60, 20],
+                                            },
+                                            {
+                                                "type": "inline_equation",
+                                                "content": "$y = f(x)$",
+                                                "bbox": [61, 10, 110, 20],
+                                            },
+                                            {
+                                                "type": "text",
+                                                "content": " over time",
+                                                "bbox": [111, 10, 200, 20],
+                                            },
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "image_body",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "image",
+                                                "image_path": "fig.png",
+                                                "bbox": [10, 30, 200, 200],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    # Create a fake image file so asset registration doesn't fail
+    (tmp_path / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    adapter = MiddleJsonAdapter(base_dir=tmp_path, strict=False)
+    ir = adapter.convert_middle_json(raw_data)
+
+    fig = next(b for b in ir.blocks if isinstance(b, Figure))
+    # Verify caption contains InlineMath
+    assert any(isinstance(inl, InlineMath) for inl in fig.caption)
+
+    evidence = build_semantic_evidence(raw_data, ir)
+    ev_blk = evidence.blocks[0]
+
+    # Evidence snapshot must be populated
+    assert len(ev_blk.caption_inlines_snapshot) > 0
+    # caption_plain_text must include the math part
+    assert "y = f(x)" in (ev_blk.caption_plain_text or "")
+
+    ledger = build_preservation_ledger(evidence, ir)
+    violations = evaluate_preservation_qa(ledger, evidence, ir)
+    assert len(violations) == 0, f"Unexpected violations: {violations}"
+
+
+def test_ak_caption_text_ocr_inlinemath_preserved(tmp_path: Path) -> None:
+    """Test AK: OCR correction on Text part of caption with InlineMath — math must be preserved."""
+    from book2epub.ir.adapter import MiddleJsonAdapter
+    from book2epub.ir.models import InlineMath
+    from book2epub.semantic.evidence import build_semantic_evidence
+    from book2epub.visual.models import OCRAuditRecord
+    from book2epub.visual.ocr_apply import apply_segment_replacements
+
+    raw_data = {
+        "_version_name": "3.4.5",
+        "_backend": "hybrid",
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [
+                    {
+                        "type": "image",
+                        "blocks": [
+                            {
+                                "type": "image_caption",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "Gr4ph of ",
+                                                "bbox": [10, 10, 60, 20],
+                                            },
+                                            {
+                                                "type": "inline_equation",
+                                                "content": "$y = f(x)$",
+                                                "bbox": [61, 10, 110, 20],
+                                            },
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "image_body",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "image",
+                                                "image_path": "fig.png",
+                                                "bbox": [10, 30, 200, 200],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    adapter = MiddleJsonAdapter(base_dir=tmp_path, strict=False)
+    ir = adapter.convert_middle_json(raw_data)
+    fig = next(b for b in ir.blocks if isinstance(b, Figure))
+
+    # Identify the Text segment for "Gr4ph of "
+    text_segs = [
+        s
+        for inl in fig.caption
+        if isinstance(inl, Text)
+        for s in inl.source_segments
+    ]
+    assert len(text_segs) == 1
+    text_seg = text_segs[0]
+
+    evidence = build_semantic_evidence(raw_data, ir)
+
+    # Apply OCR correction to the text segment
+    replacements = {(fig.id, text_seg.segment_id): "Graph of "}
+    new_blocks = apply_segment_replacements([fig], replacements, mode="safe")
+    new_fig = new_blocks[0]
+    assert isinstance(new_fig, Figure)
+
+    # Final IR uses the corrected caption — InlineMath must still be present
+    assert any(isinstance(inl, InlineMath) for inl in new_fig.caption)
+    final_ir = _create_dummy_ir([new_fig])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+
+    ocr_audits = [
+        OCRAuditRecord(
+            block_id=fig.id,
+            segment_id=text_seg.segment_id,
+            page_idx=0,
+            bbox=[10.0, 10.0, 60.0, 20.0],
+            old_text="Gr4ph of ",
+            old_sha256=compute_text_sha256("Gr4ph of "),
+            new_text="Graph of ",
+            new_sha256=compute_text_sha256("Graph of "),
+            provider="mock",
+            model="mock",
+            first_confidence=0.99,
+            visible_error_type="character_substitution",
+            content_role="caption",
+            mode="safe",
+            status="applied",
+        )
+    ]
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir, ocr_audits=ocr_audits)
+    assert len(violations) == 0, (
+        f"Unexpected violations after OCR correction on Text-only part: {violations}"
+    )
+
+
+def test_al_caption_linebreak_preserved_through_preservation_qa(
+    tmp_path: Path,
+) -> None:
+    """Test AL: Caption with Text+LineBreak+Text passes Preservation QA (LineBreak preserved)."""
+    from book2epub.ir.adapter import MiddleJsonAdapter
+    from book2epub.semantic.evidence import build_semantic_evidence
+
+    raw_data = {
+        "_version_name": "3.4.5",
+        "_backend": "hybrid",
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [
+                    {
+                        "type": "image",
+                        "blocks": [
+                            {
+                                "type": "image_caption",
+                                # Two separate lines → adapter will create two Text inlines
+                                # separated by a line break at line boundary
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "First line of caption",
+                                                "bbox": [10, 10, 200, 20],
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "second line here",
+                                                "bbox": [10, 25, 200, 35],
+                                            }
+                                        ]
+                                    },
+                                ],
+                            },
+                            {
+                                "type": "image_body",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "image",
+                                                "image_path": "fig.png",
+                                                "bbox": [10, 40, 200, 200],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "fig.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    adapter = MiddleJsonAdapter(base_dir=tmp_path, strict=False)
+    ir = adapter.convert_middle_json(raw_data)
+    # Verify a Figure with caption was produced
+    assert any(isinstance(b, Figure) for b in ir.blocks)
+
+    evidence = build_semantic_evidence(raw_data, ir)
+    ev_blk = evidence.blocks[0]
+
+    # Snapshot must be populated
+    assert len(ev_blk.caption_inlines_snapshot) > 0
+
+    # QA must pass without any corruption violation
+    ledger = build_preservation_ledger(evidence, ir)
+    violations = evaluate_preservation_qa(ledger, evidence, ir)
+    cap_violations = [v for v in violations if v.code in ("CAPTION_CORRUPTION", "CAPTION_LOSS")]
+    assert len(cap_violations) == 0, (
+        f"False CAPTION violation for multi-line caption: {cap_violations}"
+    )
+
+
+def test_am_table_caption_multiple_segs_no_false_caption_corruption(
+    tmp_path: Path,
+) -> None:
+    """Test AM: Table caption with multiple Text segments — no false CAPTION_CORRUPTION."""
+    from book2epub.ir.adapter import MiddleJsonAdapter
+    from book2epub.semantic.evidence import build_semantic_evidence
+
+    raw_data = {
+        "_version_name": "3.4.5",
+        "_backend": "hybrid",
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [
+                    {
+                        "type": "table",
+                        "blocks": [
+                            {
+                                "type": "table_caption",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "Table 1: ",
+                                                "bbox": [10, 10, 80, 20],
+                                            },
+                                            {
+                                                "type": "text",
+                                                "content": "Performance metrics",
+                                                "bbox": [81, 10, 200, 20],
+                                            },
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "table_body",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "table",
+                                                "html": "<table><tr><td>A</td></tr></table>",
+                                                "bbox": [10, 30, 200, 100],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    adapter = MiddleJsonAdapter(base_dir=tmp_path, strict=False)
+    ir = adapter.convert_middle_json(raw_data)
+    tbl = next(
+        (b for b in ir.blocks if hasattr(b, "caption") and getattr(b, "caption", None)),
+        None,
+    )
+    assert tbl is not None, "No block with caption found"
+
+    # Verify multiple Text segments in caption
+    cap_segs = [
+        s
+        for inl in getattr(tbl, "caption", [])
+        if isinstance(inl, Text)
+        for s in inl.source_segments
+    ]
+    assert len(cap_segs) >= 1
+
+    evidence = build_semantic_evidence(raw_data, ir)
+    ev_blk = evidence.blocks[0]
+    assert len(ev_blk.caption_inlines_snapshot) > 0
+
+    ledger = build_preservation_ledger(evidence, ir)
+    violations = evaluate_preservation_qa(ledger, evidence, ir)
+    cap_violations = [v for v in violations if v.code in ("CAPTION_CORRUPTION", "CAPTION_LOSS")]
+    assert len(cap_violations) == 0, (
+        f"False CAPTION violation for Table caption: {cap_violations}"
+    )
+
+
 

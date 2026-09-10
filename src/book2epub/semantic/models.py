@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from book2epub.ir.models import BBox, SourceTextSegment
 
 # Version constants (Appendix H1)
-SEMANTIC_EVIDENCE_SCHEMA_VERSION = "1.1"
+SEMANTIC_EVIDENCE_SCHEMA_VERSION = "1.2"
 SEMANTIC_DRAFT_SCHEMA_VERSION = "1.0"
 STRUCTURE_DECISION_SCHEMA_VERSION = "1.0"
 SEMANTIC_DECISION_SCHEMA_VERSION = "1.0"
@@ -127,6 +127,10 @@ class SemanticEvidenceBlock(BaseModel):
     source_segments: list[SourceTextSegment] = Field(default_factory=list)
     caption_source_segments: list[SourceTextSegment] = Field(default_factory=list)
     footnote_source_segments: list[SourceTextSegment] = Field(default_factory=list)
+    # Serialized inline structure snapshots for OCR-replacement-aware expected text
+    # reconstruction in QA (Text segments replaced, InlineMath/LineBreak/Hyperlink preserved).
+    caption_inlines_snapshot: list[dict[str, Any]] = Field(default_factory=list)
+    footnote_inlines_snapshot: list[dict[str, Any]] = Field(default_factory=list)
 
     content_sha256: str = ""
     allowed_targets: list[SemanticTarget] = Field(default_factory=list)

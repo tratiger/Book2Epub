@@ -405,17 +405,22 @@ def build_semantic_evidence(
         # Caption text & segments
         caption_text = None
         caption_source_segments: list[SourceTextSegment] = []
+        caption_inlines_snapshot: list[dict[str, Any]] = []
         if hasattr(ir_block, "caption") and getattr(ir_block, "caption"):
-            caption_text = extract_inline_visible_text(getattr(ir_block, "caption")) or None
-            caption_source_segments = extract_inline_source_segments(getattr(ir_block, "caption"))
+            cap_inlines = getattr(ir_block, "caption")
+            caption_text = extract_inline_visible_text(cap_inlines) or None
+            caption_source_segments = extract_inline_source_segments(cap_inlines)
+            caption_inlines_snapshot = [inl.model_dump() for inl in cap_inlines]
 
         # Footnote text & segments
         footnote_text = None
         footnote_source_segments: list[SourceTextSegment] = []
+        footnote_inlines_snapshot: list[dict[str, Any]] = []
         if hasattr(ir_block, "footnotes") and getattr(ir_block, "footnotes"):
             footnote_text = extract_inline_visible_text(getattr(ir_block, "footnotes")) or None
             fns = getattr(ir_block, "footnotes")
             footnote_source_segments = extract_inline_source_segments(fns)
+            footnote_inlines_snapshot = [inl.model_dump() for inl in fns]
         elif isinstance(ir_block, Footnote) and getattr(ir_block, "inlines", None):
             footnote_text = extract_inline_visible_text(getattr(ir_block, "inlines")) or None
             footnote_source_segments = extract_inline_source_segments(getattr(ir_block, "inlines"))
@@ -491,6 +496,8 @@ def build_semantic_evidence(
             source_segments=source_segments,
             caption_source_segments=caption_source_segments,
             footnote_source_segments=footnote_source_segments,
+            caption_inlines_snapshot=caption_inlines_snapshot,
+            footnote_inlines_snapshot=footnote_inlines_snapshot,
             content_sha256=content_hash,
             allowed_targets=allowed_targets,
             flags=flags,
