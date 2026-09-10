@@ -244,16 +244,23 @@ def run_visual_arbitration(
             batch, res = provider.infer(req, response_model=VisualSemanticBatch)
         except Exception as exc:
             logger.warning("Visual provider inference failed for %s: %s", audit.block_id, exc)
-            updated_audits.append(audit)
-            continue
-
-        if not batch.decisions:
-            updated_audits.append(audit)
+            updated_audit = audit.model_copy(
+                update={
+                    "final_target": audit.source_kind,
+                    "status": "preserved_original_conflict",
+                    "provider": f"{provider.name}-visual",
+                    "model": provider.model,
+                    "rejection_reason": f"Visual provider inference failed: {exc}",
+                }
+            )
+            updated_audits.append(updated_audit)
+            if audit.status == "applied":
+                revert_to_source_block_ids.add(audit.block_id)
             continue
 
         # ------------------------------------------------------------------
         # Scope validation on visual response:
-        # 0 matching decisions -> preserve/reject
+        # 0 matching decisions -> preserve/reject (handles both empty batch and wrong block_id)
         # 1 matching decision  -> use
         # 2+ matching decisions -> conflict/reject
         # ------------------------------------------------------------------
@@ -308,29 +315,90 @@ def run_visual_arbitration(
             ocr_recommended_block_ids.add(audit.block_id)
 
         # ------------------------------------------------------------------
-        # 4. Adjudication application logic (Appendix K5, M9 Section 8)
+        # 4. Semantic consistency check (decision enum authority)
+        #
+        # confirm_proposed:
+        #   -> target must equal audit.proposed_target (or be omitted).
+        #   -> target field differing indicates invalid/contradictory response.
+        # reject_keep_original:
+        #   -> target is always audit.source_kind.
+        # replace_with_alternate:
+        #   -> target is required.
+        #   -> target != source_kind.
+        #   -> target != proposed_target.
+        #   -> target in allowed_targets.
         # ------------------------------------------------------------------
-        chosen_target = vis_dec.target or vis_dec.target_type or audit.proposed_target
-        if vis_dec.decision == "reject_keep_original":
+        dec_type = vis_dec.decision
+        raw_target = vis_dec.target or vis_dec.target_type
+
+        chosen_target: str | None = None
+        invalid_reason: str | None = None
+
+        if dec_type == "confirm_proposed":
+            if raw_target and raw_target != audit.proposed_target:
+                invalid_reason = (
+                    f"Contradictory visual decision: confirm_proposed returned with "
+                    f"conflicting target {raw_target!r} (expected {audit.proposed_target!r})"
+                )
+            elif (
+                audit.proposed_target not in ev.allowed_targets
+                and audit.proposed_target != audit.source_kind
+            ):
+                invalid_reason = (
+                    f"confirm_proposed target {audit.proposed_target!r} not in "
+                    f"allowed_targets={ev.allowed_targets!r}"
+                )
+            else:
+                chosen_target = audit.proposed_target
+
+        elif dec_type == "reject_keep_original":
             chosen_target = audit.source_kind
 
-        # Scope check: chosen_target must be in evidence's allowed_targets
-        if chosen_target not in ev.allowed_targets and chosen_target != audit.source_kind:
+        elif dec_type == "replace_with_alternate":
+            if not raw_target:
+                invalid_reason = "replace_with_alternate requires a target, but none was provided"
+            elif raw_target == audit.source_kind:
+                chosen_target = audit.source_kind
+            elif raw_target == audit.proposed_target:
+                invalid_reason = (
+                    f"replace_with_alternate target {raw_target!r} is identical to "
+                    f"proposed_target; expected a distinct alternate"
+                )
+            elif raw_target not in ev.allowed_targets:
+                invalid_reason = (
+                    f"replace_with_alternate target {raw_target!r} not in "
+                    f"allowed_targets={ev.allowed_targets!r}"
+                )
+            else:
+                chosen_target = raw_target
+
+        else:
+            invalid_reason = f"Unknown visual decision type {dec_type!r}"
+
+        # If semantically invalid response, reject and preserve source kind
+        if invalid_reason is not None or chosen_target is None:
             logger.warning(
-                "Visual decision chose target=%r for block %s which is not in "
-                "allowed_targets=%r. Reverting to source kind.",
-                chosen_target,
+                "Semantically invalid visual decision for block %s: %s. Preserving original.",
                 audit.block_id,
-                ev.allowed_targets,
+                invalid_reason,
             )
-            chosen_target = audit.source_kind
+            updated_audit = audit.model_copy(
+                update={
+                    "final_target": audit.source_kind,
+                    "confidence": vis_dec.confidence,
+                    "status": "preserved_original_conflict",
+                    "provider": f"{provider.name}-visual",
+                    "model": provider.model,
+                    "rejection_reason": invalid_reason or "Invalid visual decision",
+                }
+            )
+            updated_audits.append(updated_audit)
+            if audit.status == "applied":
+                revert_to_source_block_ids.add(audit.block_id)
+            continue
 
-        applied_status = audit.status
-        final_target = audit.final_target
-
-        if vis_dec.confidence >= 0.85 and (
-            chosen_target in ev.allowed_targets or chosen_target == audit.source_kind
-        ):
+        # Confidence gate and application
+        if vis_dec.confidence >= 0.85:
             if chosen_target == audit.source_kind:
                 applied_status = "preserved_original_conflict"
                 final_target = audit.source_kind
@@ -348,7 +416,7 @@ def run_visual_arbitration(
                     + vis_dec.evidence_codes,
                     chunk_ids=[req.request_id],
                 )
-        elif vis_dec.confidence < 0.85:
+        else:
             applied_status = "preserved_original_conflict"
             final_target = audit.source_kind
             if audit.status == "applied":
