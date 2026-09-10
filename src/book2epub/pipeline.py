@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -604,8 +605,9 @@ def run_pipeline(
     # Execute M3
     render_result = run_conversion_m3(normalized_ir, paths, cfg)
 
-    # Execute M4
-    packaging_result = run_conversion_m4(render_result, output_epub, paths, cfg)
+    # Atomic EPUB packaging: write candidate to temporary file first
+    tmp_epub = output_epub.with_suffix(".epub.tmp")
+    packaging_result = run_conversion_m4(render_result, tmp_epub, paths, cfg)
 
     # Execute M5
     manifest_data = (
@@ -613,15 +615,25 @@ def run_pipeline(
         if paths.manifest_file.is_file()
         else None
     )
-    run_conversion_m5(
-        paths=paths,
-        raw_middle_path=canonical_middle,
-        book_ir=normalized_ir,
-        render_result=render_result,
-        packaging_result=packaging_result,
-        cfg=cfg,
-        manifest_data=manifest_data,
-    )
+    try:
+        run_conversion_m5(
+            paths=paths,
+            raw_middle_path=canonical_middle,
+            book_ir=normalized_ir,
+            render_result=render_result,
+            packaging_result=packaging_result,
+            cfg=cfg,
+            manifest_data=manifest_data,
+        )
+    except Exception:
+        if tmp_epub.is_file():
+            tmp_epub.unlink(missing_ok=True)
+        raise
+
+    # Promote candidate to final output_epub only after all release gates pass
+    if tmp_epub.is_file():
+        os.replace(tmp_epub, output_epub)
+        packaging_result.epub_path = output_epub
 
     return packaging_result
 
@@ -648,18 +660,29 @@ def run_from_middle(
     # Execute M3
     render_result = run_conversion_m3(normalized_ir, paths, cfg)
 
-    # Execute M4
-    packaging_result = run_conversion_m4(render_result, output_epub, paths, cfg)
+    # Atomic EPUB packaging: write candidate to temporary file first
+    tmp_epub = output_epub.with_suffix(".epub.tmp")
+    packaging_result = run_conversion_m4(render_result, tmp_epub, paths, cfg)
 
     # Execute M5
-    run_conversion_m5(
-        paths=paths,
-        raw_middle_path=canonical_middle,
-        book_ir=normalized_ir,
-        render_result=render_result,
-        packaging_result=packaging_result,
-        cfg=cfg,
-        manifest_data=None,
-    )
+    try:
+        run_conversion_m5(
+            paths=paths,
+            raw_middle_path=canonical_middle,
+            book_ir=normalized_ir,
+            render_result=render_result,
+            packaging_result=packaging_result,
+            cfg=cfg,
+            manifest_data=None,
+        )
+    except Exception:
+        if tmp_epub.is_file():
+            tmp_epub.unlink(missing_ok=True)
+        raise
+
+    # Promote candidate to final output_epub only after all release gates pass
+    if tmp_epub.is_file():
+        os.replace(tmp_epub, output_epub)
+        packaging_result.epub_path = output_epub
 
     return packaging_result

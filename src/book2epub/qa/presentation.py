@@ -43,9 +43,19 @@ def evaluate_presentation_qa(
     css_classes: set[str] = set()
     if css_path.is_file():
         css_content = css_path.read_text(encoding="utf-8")
-        lowered = css_content.lower()
-        if "position: absolute" in lowered or "position:absolute" in lowered:
+        if re.search(r"position\s*:\s*absolute\b", css_content, re.IGNORECASE):
             violations.append("book.css contains forbidden 'position: absolute'")
+        remote_css_match = re.search(
+            r"""url\s*\(\s*['"]?(?:https?:|//|ftp:)[^'")]+['"]?\s*\)"""
+            r"""|@import\s+['"]?(?:https?:|//|ftp:)[^'";]+['"]?""",
+            css_content,
+            re.IGNORECASE,
+        )
+        if remote_css_match:
+            violations.append(
+                f"book.css contains forbidden remote resource reference: "
+                f"{remote_css_match.group(0)}"
+            )
         # Extract declared classes for coverage
         css_classes = set(re.findall(r"\.([a-zA-Z0-9_\-]+)", css_content))
 
@@ -87,8 +97,8 @@ def evaluate_presentation_qa(
                                 f"Forbidden remote resource reference '{val}' in {xhtml_file.name}"
                             )
                     # Check inline style for forbidden absolute positioning
-                    style_attr = elem.attrib.get("style", "").lower()
-                    if "position: absolute" in style_attr or "position:absolute" in style_attr:
+                    style_attr = elem.attrib.get("style", "")
+                    if re.search(r"position\s*:\s*absolute\b", style_attr, re.IGNORECASE):
                         violations.append(
                             f"Forbidden inline 'position: absolute' detected in {xhtml_file.name}"
                         )

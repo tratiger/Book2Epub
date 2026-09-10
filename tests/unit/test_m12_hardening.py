@@ -28,11 +28,13 @@ from book2epub.config import AppConfig, JobConfig, OCRCorrectionConfig, Presenta
 from book2epub.ir.models import (
     BookIR,
     Figure,
+    Footnote,
     Heading,
     Paragraph,
     PreformattedBlock,
     SourceDocument,
     SourcePage,
+    SourceTextSegment,
     Table,
     Text,
 )
@@ -42,6 +44,7 @@ from book2epub.pipeline import run_conversion_m5
 from book2epub.qa.checks import run_structural_checks
 from book2epub.qa.models import PreservationLedgerEntry
 from book2epub.qa.ocr import evaluate_ocr_qa
+from book2epub.qa.presentation import evaluate_presentation_qa
 from book2epub.qa.semantic import (
     build_preservation_ledger,
     evaluate_outline_qa,
@@ -311,7 +314,27 @@ def test_f_paragraph_merge_trace_passes() -> None:
             id="p-1",
             page_idx=0,
             reading_order=0,
-            inlines=[Text(text="This is sentence one. This is sentence two.")],
+            inlines=[
+                Text(
+                    text="This is sentence one. This is sentence two.",
+                    source_segments=[
+                        SourceTextSegment(
+                            segment_id="p-1-s0",
+                            page_idx=0,
+                            block_id="p-1",
+                            text="This is sentence one. ",
+                            text_sha256="h1",
+                        ),
+                        SourceTextSegment(
+                            segment_id="p-2-s0",
+                            page_idx=1,
+                            block_id="p-2",
+                            text="This is sentence two.",
+                            text_sha256="h2",
+                        ),
+                    ],
+                )
+            ],
         )
     ])
 
@@ -364,9 +387,10 @@ def test_h_authoritative_ocr_writer_artifact_passes(tmp_path: Path) -> None:
         new_sha256=compute_text_sha256("while (true)"),
         provider="mock",
         model="mock",
-        first_confidence=0.99,
-        confirmation_confidence=0.99,
+        first_confidence=0.996,
+        confirmation_confidence=0.996,
         confirmation_result=True,
+        confirmation_observed_text="while (true)",
         visible_error_type="character_substitution",
         mode="safe",
         status="applied",
@@ -694,3 +718,294 @@ def test_p_table_terminal_visual_reject_restores_table() -> None:
 
     violations = evaluate_preservation_qa(ledger, evidence, final_ir)
     assert len(violations) == 0
+
+
+def test_q_paragraph_merge_without_provenance_fails() -> None:
+    """Test Q: Substring match without SourceTextSegment provenance must NOT pass as merged."""
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="p-1",
+                page_idx=0,
+                reading_order=0,
+                source_type="paragraph",
+                plain_text="Sentence one. ",
+                content_sha256="h1",
+            ),
+            SemanticEvidenceBlock(
+                block_id="p-2",
+                page_idx=1,
+                reading_order=0,
+                source_type="paragraph",
+                plain_text="Sentence two.",
+                content_sha256="h2",
+            ),
+        ],
+    )
+    # Paragraph p-1 happens to contain substring 'Sentence two.', but lacks provenance for p-2
+    final_ir = _create_dummy_ir([
+        Paragraph(
+            id="p-1",
+            page_idx=0,
+            reading_order=0,
+            inlines=[
+                Text(
+                    text="Sentence one. Sentence two.",
+                    source_segments=[
+                        SourceTextSegment(
+                            segment_id="p-1-s0",
+                            page_idx=0,
+                            block_id="p-1",
+                            text="Sentence one. ",
+                            text_sha256="h1",
+                        )
+                    ],
+                )
+            ],
+        )
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+    entry_p2 = next(e for e in ledger if e.source_block_id == "p-2")
+    assert entry_p2.disposition == "lost_error"
+
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+    assert any(v.code == "CONTENT_LOSS" and v.block_id == "p-2" for v in violations)
+
+
+def test_r_image_not_superseded_by_unrelated_table() -> None:
+    """Test R: Unrelated image is not falsely marked superseded because a Table exists."""
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="img-1",
+                page_idx=0,
+                reading_order=0,
+                source_type="image",
+                asset_ids=["unrelated_chart.png"],
+                content_sha256="h-img",
+            )
+        ],
+    )
+    # A table exists, but has no relation to img-1
+    final_ir = _create_dummy_ir([
+        Table(
+            id="tbl-1",
+            page_idx=0,
+            reading_order=0,
+            html="<table><tr><td>Data</td></tr></table>",
+            fallback_asset_id=None,
+        )
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+    entry_img = next(e for e in ledger if e.source_block_id == "img-1")
+    assert entry_img.disposition == "lost_error"
+
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+    assert any(v.code == "CONTENT_LOSS" and v.block_id == "img-1" for v in violations)
+
+
+def test_s_per_block_footnote_loss_detected_when_other_footnote_exists() -> None:
+    """Test S: Per-block footnote loss is caught even if another block has a footnote."""
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="p-1",
+                page_idx=0,
+                reading_order=0,
+                source_type="paragraph",
+                footnote_text="Footnote for P1",
+                content_sha256="h1",
+            ),
+            SemanticEvidenceBlock(
+                block_id="p-2",
+                page_idx=0,
+                reading_order=1,
+                source_type="paragraph",
+                footnote_text="Footnote for P2",
+                content_sha256="h2",
+            ),
+        ],
+    )
+    # P1 lost its footnote, but P2 retained its footnote
+    final_ir = _create_dummy_ir([
+        Paragraph(id="p-1", page_idx=0, reading_order=0, inlines=[Text(text="P1 text")]),
+        Paragraph(
+            id="p-2",
+            page_idx=0,
+            reading_order=1,
+            inlines=[Text(text="P2 text")],
+        ),
+        Footnote(
+            id="p-2-fn",
+            page_idx=0,
+            reading_order=2,
+            inlines=[Text(text="Footnote for P2")],
+            sources=[],
+        ),
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+    # Must flag FOOTNOTE_LOSS specifically for p-1
+    assert any(v.code == "FOOTNOTE_LOSS" and v.block_id == "p-1" for v in violations)
+
+
+def test_t_per_block_caption_loss_detected() -> None:
+    """Test T: Caption loss is detected when evidence had caption and final block does not."""
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="tbl-1",
+                page_idx=0,
+                reading_order=0,
+                source_type="table",
+                table_html="<table><tr><td>A</td></tr></table>",
+                caption_text="Table 1: Important Results",
+                content_sha256="h-tbl",
+            )
+        ],
+    )
+    final_ir = _create_dummy_ir([
+        Table(
+            id="tbl-1",
+            page_idx=0,
+            reading_order=0,
+            html="<table><tr><td>A</td></tr></table>",
+            caption=[],  # Caption lost
+        )
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+    assert any(v.code == "CAPTION_LOSS" and v.block_id == "tbl-1" for v in violations)
+
+
+def test_u_latin_whitespace_removal_fails_preservation() -> None:
+    """Test U: Latin whitespace removal ('foo bar' -> 'foobar') is rejected as corruption."""
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="p-1",
+                page_idx=0,
+                reading_order=0,
+                source_type="paragraph",
+                plain_text="foo bar",
+                content_sha256=compute_text_sha256("foo bar"),
+            )
+        ],
+    )
+    final_ir = _create_dummy_ir([
+        Paragraph(id="p-1", page_idx=0, reading_order=0, inlines=[Text(text="foobar")])
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+    assert "Text mismatch" in (ledger[0].reason or "")
+
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+    assert any(v.code == "TEXT_FABRICATION_OR_CORRUPTION" for v in violations)
+
+
+def test_v_cjk_whitespace_removal_passes_preservation() -> None:
+    """Test V: CJK spacing differences ('日 本 語' -> '日本語') pass preservation."""
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="p-1",
+                page_idx=0,
+                reading_order=0,
+                source_type="paragraph",
+                plain_text="日 本 語",
+                content_sha256=compute_text_sha256("日 本 語"),
+            )
+        ],
+    )
+    final_ir = _create_dummy_ir([
+        Paragraph(id="p-1", page_idx=0, reading_order=0, inlines=[Text(text="日本語")])
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+    assert "Text mismatch" not in (ledger[0].reason or "")
+
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+    assert not any(v.code == "TEXT_FABRICATION_OR_CORRUPTION" for v in violations)
+
+
+def test_w_remote_url_in_book_css_fails_presentation_qa(tmp_path: Path) -> None:
+    """Test W: Remote resource reference in book.css fails presentation QA."""
+    styles_dir = tmp_path / "styles"
+    styles_dir.mkdir(parents=True, exist_ok=True)
+    css_file = styles_dir / "book.css"
+    css_file.write_text(
+        "@import url('https://fonts.googleapis.com/css2?family=Roboto');\nbody { margin: 0; }",
+        encoding="utf-8",
+    )
+
+    metrics, violations = evaluate_presentation_qa(oebps_dir=tmp_path)
+    assert any("forbidden remote resource reference" in v for v in violations)
+
+
+def test_x_atomic_epub_promotion_failure_does_not_replace_output(tmp_path: Path) -> None:
+    """Test X: Strict release gate failure prevents atomic promotion of EPUB."""
+    from unittest.mock import patch
+
+    work_dir = tmp_path / "work"
+    paths = create_job_paths(work_dir)
+    paths.semantic_dir.mkdir(parents=True, exist_ok=True)
+    paths.qa_dir.mkdir(parents=True, exist_ok=True)
+    paths.render_oebps_dir.mkdir(parents=True, exist_ok=True)
+
+    target_epub = tmp_path / "final_book.epub"
+    target_epub.write_bytes(b"ORIGINAL_VALID_CONTENT")
+
+    raw_middle = tmp_path / "middle.json"
+    raw_middle.write_text(json.dumps({"pdf_info": []}), encoding="utf-8")
+    book_ir = _create_dummy_ir([])
+
+    render_result = _create_dummy_render_result(paths.render_oebps_dir)
+    cfg = JobConfig(app=AppConfig(strict=True))
+
+    from book2epub.pipeline import run_pipeline
+
+    # Mock M1, M2, M3, M4 to create tmp epub and run M5
+    gate_err = RuntimeError("Strict QA release gate failed")
+    with patch("book2epub.pipeline.run_conversion_m1", return_value=(paths, raw_middle)), \
+         patch("book2epub.pipeline.run_conversion_m2", return_value=(paths, book_ir)), \
+         patch("book2epub.pipeline.run_conversion_m3", return_value=render_result), \
+         patch("book2epub.pipeline.run_conversion_m4") as mock_m4, \
+         patch("book2epub.pipeline.run_conversion_m5", side_effect=gate_err):
+
+        def fake_m4(res, out_epub, p, c):
+            out_epub.write_bytes(b"CANDIDATE_EPUB")
+            return _create_dummy_packaging_result(out_epub)
+
+        mock_m4.side_effect = fake_m4
+
+        with pytest.raises(RuntimeError, match="Strict QA release gate failed"):
+            run_pipeline(tmp_path / "pages", target_epub, cfg)
+
+    # Verify original epub was NOT replaced
+    assert target_epub.read_bytes() == b"ORIGINAL_VALID_CONTENT"
+    # Verify temporary file was cleaned up
+    tmp_epub = target_epub.with_suffix(".epub.tmp")
+    assert not tmp_epub.exists()
+

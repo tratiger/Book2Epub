@@ -7,6 +7,7 @@ from typing import Any
 
 from book2epub.qa.models import OCRQAMetrics
 from book2epub.visual.models import OCRCorrectionAuditFile
+from book2epub.visual.validation import calculate_changed_codepoints, is_sensitive_change
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +86,8 @@ def evaluate_ocr_qa(
                 )
 
             if a.status == "applied":
-                # Compute changed codepoints
-                diff = abs(len(a.new_text) - len(a.old_text)) + sum(
-                    1 for x, y in zip(a.old_text, a.new_text, strict=False) if x != y
-                )
+                # Compute changed codepoints using authoritative SequenceMatcher logic
+                diff = calculate_changed_codepoints(a.old_text, a.new_text)
                 actual_changed_cps += diff
 
                 # Hash resolution check
@@ -126,7 +125,31 @@ def evaluate_ocr_qa(
                     )
 
                 # Sensitive / code confirmation check
-                if a.confirmation_result is not None and a.confirmation_result is False:
+                is_sensitive = is_sensitive_change(a.old_text, a.new_text)
+                if is_sensitive:
+                    if a.confirmation_result is not True:
+                        violations.append(
+                            f"Sensitive OCR proposal for segment '{a.segment_id}' "
+                            f"was applied without confirmation_result=True"
+                        )
+                    if a.first_confidence < 0.995:
+                        violations.append(
+                            f"Sensitive OCR proposal for segment '{a.segment_id}' "
+                            f"was applied with first_confidence={a.first_confidence} < 0.995"
+                        )
+                    if a.confirmation_confidence is None or a.confirmation_confidence < 0.995:
+                        violations.append(
+                            f"Sensitive OCR proposal for segment '{a.segment_id}' "
+                            f"was applied with "
+                            f"confirmation_confidence={a.confirmation_confidence} < 0.995"
+                        )
+                    if a.confirmation_observed_text != a.new_text:
+                        violations.append(
+                            f"Sensitive OCR proposal for segment '{a.segment_id}' "
+                            f"was applied with mismatched confirmation text: "
+                            f"'{a.confirmation_observed_text}' != '{a.new_text}'"
+                        )
+                elif a.confirmation_result is not None and a.confirmation_result is False:
                     violations.append(
                         f"OCR proposal for segment '{a.segment_id}' "
                         f"was applied despite confirmation disagreement"
@@ -160,9 +183,7 @@ def evaluate_ocr_qa(
             applied_count += 1
             old_t = p.get("original_text", "")
             new_t = p.get("proposed_text", "")
-            diff = abs(len(new_t) - len(old_t)) + sum(
-                1 for a, b in zip(old_t, new_t, strict=False) if a != b
-            )
+            diff = calculate_changed_codepoints(old_t, new_t)
             changed_cps += diff
 
             # Invariant: mode == "off" must never apply
