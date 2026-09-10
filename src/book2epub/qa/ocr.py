@@ -1,10 +1,14 @@
 """OCR correction quality metrics and release safety invariants (M12/Appendix N5)."""
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from book2epub.qa.models import OCRQAMetrics
+from book2epub.visual.models import OCRCorrectionAuditFile
+
+logger = logging.getLogger(__name__)
 
 
 def evaluate_ocr_qa(
@@ -13,14 +17,13 @@ def evaluate_ocr_qa(
 ) -> tuple[OCRQAMetrics, list[str]]:
     """
     Evaluate OCR correction metrics and assert safety invariants.
+    Supports authoritative OCRCorrectionAuditFile schema with legacy fallback.
     Returns (metrics, violation_warnings).
     """
     metrics = OCRQAMetrics(ocr_mode=cfg_mode)
     violations: list[str] = []
 
     if not ocr_corrections_path or not ocr_corrections_path.is_file():
-        if cfg_mode == "off":
-            return metrics, violations
         return metrics, violations
 
     try:
@@ -29,7 +32,52 @@ def evaluate_ocr_qa(
         violations.append(f"Failed to parse ocr-corrections.json: {e}")
         return metrics, violations
 
-    proposals: list[dict[str, Any]] = data.get("proposals", [])
+    # 1. Authoritative OCRCorrectionAuditFile schema
+    if isinstance(data, dict) and "audits" in data:
+        try:
+            audit_file = OCRCorrectionAuditFile.model_validate(data)
+            metrics.eligible_segment_count = audit_file.eligible_segment_count
+            metrics.ocr_candidate_count = audit_file.candidate_count
+            metrics.ocr_proposal_count = len(audit_file.audits)
+            metrics.ocr_applied_count = audit_file.applied_count
+            metrics.ocr_rejected_count = audit_file.rejected_count
+            metrics.ocr_changed_codepoints = audit_file.changed_codepoints
+            metrics.ocr_budget_exceeded = audit_file.budget_exceeded
+            if audit_file.total_codepoints > 0:
+                metrics.ocr_changed_fraction = (
+                    audit_file.changed_codepoints / audit_file.total_codepoints
+                )
+
+            for a in audit_file.audits:
+                if a.confirmation_result is not None:
+                    if a.status == "applied":
+                        metrics.ocr_sensitive_confirmation_count += 1
+                    else:
+                        metrics.ocr_confirmation_disagreement_count += 1
+
+                # Invariant: mode == "off" must never apply
+                if cfg_mode == "off" and a.status == "applied":
+                    violations.append(
+                        f"OCR mode is off but proposal for block '{a.block_id}' was applied"
+                    )
+
+                # Invariant: math source text is immutable
+                if "math" in a.block_id.lower() or "math" in a.segment_id.lower():
+                    if a.status == "applied":
+                        violations.append(
+                            f"Math text was illegally modified by OCR proposal for "
+                            f"block '{a.block_id}'"
+                        )
+
+
+            return metrics, violations
+        except Exception as e:
+            logger.debug("Failed parsing as OCRCorrectionAuditFile, trying legacy: %s", e)
+
+    # 2. Legacy schema support (e.g. dict with "proposals")
+    proposals: list[dict[str, Any]] = (
+        data.get("proposals", []) if isinstance(data, dict) else []
+    )
     metrics.ocr_proposal_count = len(proposals)
 
     applied_count = 0
@@ -76,6 +124,10 @@ def evaluate_ocr_qa(
     metrics.ocr_sensitive_confirmation_count = sensitive_conf
     metrics.ocr_confirmation_disagreement_count = sensitive_disagree
     metrics.ocr_changed_codepoints = changed_cps
-    metrics.ocr_budget_exceeded = data.get("budget_exceeded", False)
+    metrics.ocr_budget_exceeded = (
+        data.get("budget_exceeded", False) if isinstance(data, dict) else False
+    )
 
     return metrics, violations
+
+

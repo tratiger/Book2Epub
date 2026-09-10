@@ -84,6 +84,7 @@ class EditBudgetTracker:
         self.total_codepoints = max(1, total_codepoints)
         self.changed_segments = 0
         self.changed_codepoints = 0
+        self.budget_exceeded = False
 
     @property
     def max_changed_segments(self) -> int:
@@ -99,8 +100,10 @@ class EditBudgetTracker:
 
     def can_apply(self, additional_codepoints: int) -> bool:
         if (self.changed_segments + 1) > self.max_changed_segments:
+            self.budget_exceeded = True
             return False
         if (self.changed_codepoints + additional_codepoints) > self.max_changed_codepoints:
+            self.budget_exceeded = True
             return False
         return True
 
@@ -143,20 +146,23 @@ def validate_ocr_proposal(
 
     changed_cp = calculate_changed_codepoints(old_text, proposal.proposed_text)
 
-    # 5. Mode-specific rules
+    # 5. Confidence threshold check (raised: sensitive/code >= 0.995, ordinary prose >= 0.98)
+    sensitive = is_sensitive_change(
+        old_text, proposal.proposed_text, is_code_or_preformatted=is_code_or_preformatted
+    )
+    required_conf = 0.995 if (sensitive or is_code_or_preformatted) else 0.98
+    if proposal.confidence < required_conf:
+        return False, "suggested_below_threshold", [
+            f"Confidence ({proposal.confidence}) below threshold {required_conf}"
+        ]
+
+    # 6. Mode-specific rules
     if mode == "safe":
         if is_code_or_preformatted:
             return False, "rejected", ["CodeBlock / PreformattedBlock excluded in safe mode"]
 
         if "\n" in proposal.proposed_text and "\n" not in old_text:
             return False, "rejected", ["Cannot introduce newline in safe mode"]
-
-        sensitive = is_sensitive_change(old_text, proposal.proposed_text)
-        required_conf = 0.995 if sensitive else 0.98
-        if proposal.confidence < required_conf:
-            return False, "suggested_below_threshold", [
-                f"Confidence ({proposal.confidence}) below threshold {required_conf}"
-            ]
 
         if changed_cp > 24:
             return False, "rejected", [
@@ -181,13 +187,9 @@ def validate_ocr_proposal(
                     f"Edit distance ({changed_cp}) exceeds code budget ({lev_limit})"
                 ]
 
-        if proposal.confidence < 0.95:
-            return False, "suggested_below_threshold", [
-                f"Confidence ({proposal.confidence}) below minimum threshold 0.95"
-            ]
-
-    # 6. Book-level cumulative edit budget
+    # 7. Book-level cumulative edit budget
     if not budget_tracker.can_apply(changed_cp):
         return False, "budget_exceeded", ["Book-level cumulative OCR edit budget exceeded"]
 
     return True, "valid", reasons
+

@@ -150,13 +150,17 @@ class MockMultimodalPipelineProvider:
             return batch, res  # type: ignore[return-value]
 
         elif response_model == OCRCorrectionBatch:
+            seg_match = re.search(r"Segment ID:\s*(\S+)", request.user_text)
+            blk_match = re.search(r"Block ID:\s*(\S+)", request.user_text)
+            seg_id = seg_match.group(1) if seg_match else "blk-00002-p000-l000-s000"
+            blk_id = blk_match.group(1) if blk_match else "blk-00002"
             # Propose correction for paragraph typo
             batch = OCRCorrectionBatch(
                 schema_version="1.0",
                 proposals=[
                     OCRCorrectionProposal(
-                        block_id="blk-00002",
-                        segment_id="blk-00002-seg-0",
+                        block_id=blk_id,
+                        segment_id=seg_id,
                         old_text_sha256=compute_text_sha256("すべてのファ\ufffdルを保存する"),
                         proposed_text="すべてのファイルを保存する",
                         confidence=0.99,
@@ -165,6 +169,7 @@ class MockMultimodalPipelineProvider:
                     )
                 ],
             )
+
             res = StructuredInferenceResult(
                 request_id=request.request_id,
                 provider=self.name,

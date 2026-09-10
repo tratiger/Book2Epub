@@ -29,6 +29,7 @@ from book2epub.semantic.models import SemanticEvidenceBlock, SemanticEvidenceBoo
 from book2epub.visual.models import (
     OCRCorrectionBatch,
     OCRCorrectionProposal,
+    OCRIndependentRead,
     OCRSensitiveConfirmation,
 )
 from book2epub.visual.ocr_apply import run_ocr_correction
@@ -46,10 +47,14 @@ class MockOCRProvider:
     def __init__(
         self,
         proposal: OCRCorrectionProposal | None = None,
+        proposals: list[OCRCorrectionProposal] | None = None,
         confirmation: OCRSensitiveConfirmation | None = None,
+        independent_read: OCRIndependentRead | None = None,
     ) -> None:
         self.proposal = proposal
+        self.proposals = proposals
         self.confirmation = confirmation
+        self.independent_read = independent_read
         self.calls_count = 0
 
     @property
@@ -65,9 +70,13 @@ class MockOCRProvider:
         usage = ProviderUsage(input_tokens=100, output_tokens=30)
 
         if response_model == OCRCorrectionBatch:
+            if self.proposals is not None:
+                props = self.proposals
+            else:
+                props = [self.proposal] if self.proposal else []
             batch = OCRCorrectionBatch(
                 schema_version="1.0",
-                proposals=[self.proposal] if self.proposal else [],
+                proposals=props,
             )
             res = StructuredInferenceResult(
                 request_id=request.request_id,
@@ -79,6 +88,54 @@ class MockOCRProvider:
                 latency_ms=10,
             )
             return batch, res  # type: ignore[return-value]
+
+        elif response_model == OCRIndependentRead:
+            if self.independent_read is not None:
+                indep = self.independent_read
+            elif self.confirmation is not None:
+                if self.confirmation.confirm:
+                    indep = OCRIndependentRead(
+                        block_id=self.proposal.block_id if self.proposal else "p1",
+                        segment_id=self.proposal.segment_id if self.proposal else "s0",
+                        observed_text=(
+                            self.proposal.proposed_text
+                            if (self.proposal and self.proposal.proposed_text)
+                            else "text"
+                        ),
+                        confidence=max(0.995, self.confirmation.confidence),
+                        clear_enough=True,
+                    )
+                else:
+                    indep = OCRIndependentRead(
+                        block_id=self.proposal.block_id if self.proposal else "p1",
+                        segment_id=self.proposal.segment_id if self.proposal else "s0",
+                        observed_text="INDEPENDENT_DISAGREEMENT",
+                        confidence=self.confirmation.confidence,
+                        clear_enough=False,
+                    )
+            else:
+                indep = OCRIndependentRead(
+                    block_id=self.proposal.block_id if self.proposal else "p1",
+                    segment_id=self.proposal.segment_id if self.proposal else "s0",
+                    observed_text=(
+                        self.proposal.proposed_text
+                        if (self.proposal and self.proposal.proposed_text)
+                        else "text"
+                    ),
+                    confidence=0.998,
+                    clear_enough=True,
+                )
+
+            res = StructuredInferenceResult(
+                request_id=request.request_id,
+                provider=self.name,
+                model=self.model,
+                raw_text=indep.model_dump_json(),
+                parsed_json=indep.model_dump(),
+                usage=usage,
+                latency_ms=10,
+            )
+            return indep, res  # type: ignore[return-value]
 
         elif response_model == OCRSensitiveConfirmation:
             conf = self.confirmation or OCRSensitiveConfirmation(
@@ -96,6 +153,7 @@ class MockOCRProvider:
             return conf, res  # type: ignore[return-value]
 
         raise ValueError(f"Unexpected response model: {response_model}")
+
 
 
 def _setup_visual_source(tmp_path: Path) -> VisualSource:
@@ -282,14 +340,15 @@ def test_ocr_apply_code_in_all_mode_with_confirmation(tmp_path: Path) -> None:
             segment_id="c1-seg-0",
             old_text_sha256=old_hash,
             proposed_text=proposed_code,
-            confidence=0.99,
+            confidence=0.998,
             visible_error_type="character_substitution",
             rationale="Typo 'retum' is clearly 'return'",
         ),
         confirmation=OCRSensitiveConfirmation(
-            confirm=True, exact_visible_match=True, confidence=0.98
+            confirm=True, exact_visible_match=True, confidence=0.998
         ),
     )
+
 
     cfg = JobConfig(ocr_correction=OCRCorrectionConfig(mode="all"))
 

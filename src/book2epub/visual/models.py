@@ -99,6 +99,21 @@ class OCRSensitiveConfirmation(BaseModel):
     rationale: str | None = Field(default=None, max_length=200)
 
 
+class OCRIndependentRead(BaseModel):
+    """
+    Independent visible transcription for OCR confirmation (Appendix K11, M9 hardening).
+    The model transcribes the crop independently without being shown the proposed text.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_id: str
+    segment_id: str
+    observed_text: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    clear_enough: bool
+
+
 class OCRAuditRecord(BaseModel):
     """
     Audit record for every proposed/applied OCR correction (Appendix K15).
@@ -119,6 +134,7 @@ class OCRAuditRecord(BaseModel):
     first_confidence: float
     confirmation_confidence: float | None = None
     confirmation_result: bool | None = None
+    confirmation_observed_text: str | None = None
     visible_error_type: str
     mode: Literal["safe", "all"]
     status: Literal[
@@ -129,3 +145,24 @@ class OCRAuditRecord(BaseModel):
         "mapping_ambiguous",
     ]
     rejection_reasons: list[str] = Field(default_factory=list)
+
+
+class OCRCorrectionAuditFile(BaseModel):
+    """
+    Authoritative container and contract for semantic/ocr-corrections.json
+    (Appendix K15, M12/Appendix N5).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    mode: Literal["off", "safe", "all"]
+    eligible_segment_count: int = 0
+    candidate_count: int = 0
+    applied_count: int = 0
+    rejected_count: int = 0
+    budget_exceeded: bool = False
+    total_codepoints: int = 0
+    changed_codepoints: int = 0
+    audits: list[OCRAuditRecord] = Field(default_factory=list)
+

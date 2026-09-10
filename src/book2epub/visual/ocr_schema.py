@@ -48,3 +48,22 @@ Proposed Candidate: {proposed_candidate}
 
 Does the proposed candidate exactly match the printed characters in the image crop?
 """
+
+OCR_INDEPENDENT_READ_SYSTEM_INSTRUCTION = """\
+You are an independent visual transcription assistant for technical publications.
+You are given an image crop of printed text from a document page.
+
+Instructions:
+1. Carefully read and transcribe the exact printed characters visible in the image crop.
+2. Transcribe only what is directly visible without guessing or assuming hidden text.
+3. Set clear_enough to true only if the glyphs are legible and unambiguous.
+4. If the image crop is blurry, cut off, or illegible, set clear_enough to false.
+5. Provide your response conforming strictly to the requested JSON schema.
+"""
+
+OCR_INDEPENDENT_READ_USER_PROMPT = """\
+Transcribe the exact printed text visible in the attached image crop:
+Block ID: {block_id}
+Segment ID: {segment_id}
+"""
+
