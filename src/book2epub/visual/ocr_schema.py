@@ -15,7 +15,9 @@ Instructions:
    ambiguous, do NOT alter the text. Set proposed_text to null and visible_error_type to
    "no_clear_error".
 4. Never generate arbitrary prose or rewrite sentences. Only correct genuine OCR errors.
-5. Provide your response conforming strictly to the requested JSON schema.
+5. In your proposal, you must echo the exact block_id, segment_id, and old_text_sha256 provided
+   in the prompt for identity binding.
+6. Provide your response conforming strictly to the requested JSON schema.
 """
 
 OCR_CONFIRMATION_SYSTEM_INSTRUCTION = """\
@@ -35,11 +37,14 @@ OCR_PROPOSAL_USER_PROMPT = """\
 Inspect the attached image crop and review the following OCR text segment:
 Block ID: {block_id}
 Segment ID: {segment_id}
+Old Text SHA-256: {old_text_sha256}
 Current OCR Text: {current_text}
 Candidate Reason: {candidate_reason}
 
 Propose any necessary correction conforming to the schema.
+You must echo the exact Block ID, Segment ID, and Old Text SHA-256 in your proposal.
 """
+
 
 OCR_CONFIRMATION_USER_PROMPT = """\
 Independently verify whether the proposed candidate matches the attached image crop:

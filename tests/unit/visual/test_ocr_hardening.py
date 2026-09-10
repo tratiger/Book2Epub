@@ -849,3 +849,203 @@ def test_m_provider_usage_recorded_for_proposal_and_confirmation(tmp_path: Path)
         assert rec["model"] == "mock-vlm-v1"
         assert "usage" in rec
         assert "latency_ms" in rec
+
+
+# --- Test N: Old Text SHA-256 in Prompt ---
+def test_n_old_text_sha256_in_prompt(tmp_path: Path) -> None:
+    """Test N: Pass 1 user prompt contains the exact old_text_sha256 token."""
+    visual_source = _setup_visual_source(tmp_path)
+    paths = create_job_paths(tmp_path / "work")
+    paths.ensure_directories()
+
+    old_text = "すべてのファ\ufffdルを保存する"
+    old_hash = compute_text_sha256(old_text)
+    para = _make_para("p1", old_text)
+    bookir = BookIR(
+        metadata=BookMetadata(title="Test"),
+        source=SourceDocument(page_count=1),
+        blocks=[para],
+    )
+    evidence = _make_evidence("p1")
+
+    provider = HardenedMockOCRProvider(
+        proposals=[
+            OCRCorrectionProposal(
+                block_id="p1",
+                segment_id="p1-s0",
+                old_text_sha256=old_hash,
+                proposed_text="すべてのファイルを保存する",
+                confidence=0.99,
+                visible_error_type="character_substitution",
+                rationale="test",
+            )
+        ]
+    )
+    cfg = JobConfig(ocr_correction=OCRCorrectionConfig(mode="safe"))
+    run_ocr_correction(bookir, evidence, cfg, paths, visual_source, provider=provider)
+
+    assert len(provider.recorded_requests) >= 1
+    req_text = provider.recorded_requests[0].user_text
+    assert f"Old Text SHA-256: {old_hash}" in req_text
+    assert old_hash in req_text
+
+
+# --- Test O: Crop and API Failure Audit Invariant ---
+def test_o_crop_and_api_failure_audit_invariant(tmp_path: Path) -> None:
+    """Test O: Crop or API failures produce rejected audit records.
+
+    Also tests that candidate_count == applied_count + rejected_count == len(audits).
+    """
+    from unittest.mock import patch
+
+    visual_source = _setup_visual_source(tmp_path)
+    paths = create_job_paths(tmp_path / "work")
+    paths.ensure_directories()
+
+    old_text = "テキスト破損 \ufffd 発見"
+    para = _make_para("p1", old_text)
+    bookir = BookIR(
+        metadata=BookMetadata(title="Test"),
+        source=SourceDocument(page_count=1),
+        blocks=[para],
+    )
+    evidence = _make_evidence("p1")
+    cfg = JobConfig(ocr_correction=OCRCorrectionConfig(mode="safe"))
+
+    # 1. Crop Failure
+    provider_crop = HardenedMockOCRProvider()
+    with patch(
+        "book2epub.visual.ocr_apply.map_and_crop",
+        side_effect=RuntimeError("Simulated crop failure"),
+    ):
+        res_ir, audits_crop = run_ocr_correction(
+            bookir, evidence, cfg, paths, visual_source, provider=provider_crop
+        )
+
+    assert len(audits_crop) == 1
+    assert audits_crop[0].status == "rejected"
+    assert any("Failed to generate visual crop" in r for r in audits_crop[0].rejection_reasons)
+    audit_file_crop = OCRCorrectionAuditFile.model_validate_json(
+        paths.semantic_ocr_corrections_json.read_text(encoding="utf-8")
+    )
+    assert audit_file_crop.candidate_count == 1
+    assert audit_file_crop.applied_count == 0
+    assert audit_file_crop.rejected_count == 1
+    assert (
+        audit_file_crop.candidate_count
+        == audit_file_crop.applied_count + audit_file_crop.rejected_count
+        == len(audit_file_crop.audits)
+    )
+
+    # 2. Provider API Failure
+    class FailingProvider(HardenedMockOCRProvider):
+        def infer(self, request, response_model):
+            self.calls_count += 1
+            raise RuntimeError("API timeout failure")
+
+    provider_fail = FailingProvider()
+    res_ir, audits_fail = run_ocr_correction(
+        bookir, evidence, cfg, paths, visual_source, provider=provider_fail
+    )
+
+    assert len(audits_fail) == 1
+    assert audits_fail[0].status == "rejected"
+    assert any(
+        "OCR proposal provider inference failed" in r
+        for r in audits_fail[0].rejection_reasons
+    )
+    audit_file_fail = OCRCorrectionAuditFile.model_validate_json(
+        paths.semantic_ocr_corrections_json.read_text(encoding="utf-8")
+    )
+    assert audit_file_fail.candidate_count == 1
+    assert audit_file_fail.applied_count == 0
+    assert audit_file_fail.rejected_count == 1
+    assert (
+        audit_file_fail.candidate_count
+        == audit_file_fail.applied_count + audit_file_fail.rejected_count
+        == len(audit_file_fail.audits)
+    )
+
+
+# --- Test P: Nested Prose Page Size Lookup and Safe Coordinate Failure ---
+def test_p_nested_prose_page_size_lookup_and_failure(tmp_path: Path) -> None:
+    """Test P: Nested prose resolves page size from page_size_lookup.
+
+    Fails safely if page size is missing.
+    """
+    visual_source = _setup_visual_source(tmp_path)
+    paths = create_job_paths(tmp_path / "work")
+    paths.ensure_directories()
+
+    old_text = "例題内の破損 \ufffd"
+    old_hash = compute_text_sha256(old_text)
+    # ex-p1 is nested inside ex-1; top-level evidence only has ex-1
+    nested_para = _make_para("ex-p1", old_text, page_idx=0)
+    ex_blk = ExampleBlock(id="ex-1", blocks=[nested_para])
+    bookir = BookIR(
+        metadata=BookMetadata(title="Test"),
+        source=SourceDocument(page_count=1),
+        blocks=[ex_blk],
+    )
+
+    # 1. Evidence has page_size [700, 1000] on top-level block ex-1
+    evidence_with_page_size = SemanticEvidenceBook(
+        schema_version="1.0",
+        source_middle_sha256="h1",
+        raw_bookir_sha256="h2",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="ex-1",
+                page_idx=0,
+                bbox=[10, 10, 200, 100],
+                page_size=[700, 1000],  # Non-standard page size
+            )
+        ],
+    )
+
+    provider = HardenedMockOCRProvider(
+        proposals=[
+            OCRCorrectionProposal(
+                block_id="ex-p1",
+                segment_id="ex-p1-s0",
+                old_text_sha256=old_hash,
+                proposed_text="例題内の破損 修",
+                confidence=0.99,
+                visible_error_type="character_substitution",
+                rationale="test",
+            )
+        ]
+    )
+    cfg = JobConfig(ocr_correction=OCRCorrectionConfig(mode="safe"))
+
+    res_ir, audits = run_ocr_correction(
+        bookir, evidence_with_page_size, cfg, paths, visual_source, provider=provider
+    )
+    assert len(audits) == 1
+    assert audits[0].status == "applied"
+    assert audits[0].new_text == "例題内の破損 修"
+
+    # 2. Evidence has NO valid page_size for page_idx 0 -> candidate is rejected safely
+    evidence_no_page_size = SemanticEvidenceBook(
+        schema_version="1.0",
+        source_middle_sha256="h1",
+        raw_bookir_sha256="h2",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="ex-1",
+                page_idx=0,
+                bbox=[10, 10, 200, 100],
+                page_size=[0.0, 0.0],
+            )
+        ],
+    )
+    res_ir2, audits2 = run_ocr_correction(
+        bookir, evidence_no_page_size, cfg, paths, visual_source, provider=provider
+    )
+    assert len(audits2) == 1
+    assert audits2[0].status == "rejected"
+    assert any(
+        "Source page dimensions unavailable for coordinate mapping" in r
+        for r in audits2[0].rejection_reasons
+    )
+

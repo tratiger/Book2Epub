@@ -266,6 +266,18 @@ def run_ocr_correction(
 
     raster_cache = PageRasterCache(paths.semantic_visual_pages_dir, visual_source)
     evidence_lookup = {b.block_id: b for b in evidence.blocks}
+    page_size_lookup: dict[int, tuple[int, int]] = {}
+    for b in evidence.blocks:
+        if (
+            b.page_size
+            and len(b.page_size) >= 2
+            and b.page_size[0] > 0
+            and b.page_size[1] > 0
+        ):
+            page_size_lookup.setdefault(
+                b.page_idx,
+                (int(b.page_size[0]), int(b.page_size[1])),
+            )
 
     audits: list[OCRAuditRecord] = []
     # Segment-level replacements: (block_id, segment_id) -> new_text
@@ -297,11 +309,42 @@ def run_ocr_correction(
             )
             continue
 
-        source_page_size = (
-            (int(ev.page_size[0]), int(ev.page_size[1]))
-            if ev and ev.page_size and len(ev.page_size) >= 2 and ev.page_size[0] > 0
-            else (600, 800)
-        )
+        source_page_size: tuple[int, int] | None = None
+        if (
+            ev
+            and ev.page_size
+            and len(ev.page_size) >= 2
+            and ev.page_size[0] > 0
+            and ev.page_size[1] > 0
+        ):
+            source_page_size = (int(ev.page_size[0]), int(ev.page_size[1]))
+        elif cand.page_idx in page_size_lookup:
+            source_page_size = page_size_lookup[cand.page_idx]
+
+        if source_page_size is None:
+            audits.append(
+                OCRAuditRecord(
+                    block_id=cand.block_id,
+                    segment_id=cand.segment_id,
+                    page_idx=cand.page_idx,
+                    bbox=bbox,
+                    old_text=cand.old_text,
+                    new_text=cand.old_text,
+                    old_sha256=cand.old_text_sha256,
+                    new_sha256=cand.old_text_sha256,
+                    provider=provider.name,
+                    model=provider.model,
+                    request_ids=[],
+                    first_confidence=0.0,
+                    visible_error_type="no_clear_error",
+                    mode=mode,
+                    status="rejected",
+                    rejection_reasons=[
+                        "Source page dimensions unavailable for coordinate mapping"
+                    ],
+                )
+            )
+            continue
 
         # 3. Generate segment crop
         try:
@@ -316,6 +359,26 @@ def run_ocr_correction(
             )
         except Exception as exc:
             logger.warning("Failed to render crop for segment %s: %s", cand.segment_id, exc)
+            audits.append(
+                OCRAuditRecord(
+                    block_id=cand.block_id,
+                    segment_id=cand.segment_id,
+                    page_idx=cand.page_idx,
+                    bbox=bbox,
+                    old_text=cand.old_text,
+                    new_text=cand.old_text,
+                    old_sha256=cand.old_text_sha256,
+                    new_sha256=cand.old_text_sha256,
+                    provider=provider.name,
+                    model=provider.model,
+                    request_ids=[],
+                    first_confidence=0.0,
+                    visible_error_type="no_clear_error",
+                    mode=mode,
+                    status="rejected",
+                    rejection_reasons=[f"Failed to generate visual crop: {exc}"],
+                )
+            )
             continue
 
         # 4. Request Proposal from Vision Provider
@@ -323,6 +386,7 @@ def run_ocr_correction(
         user_prompt = OCR_PROPOSAL_USER_PROMPT.format(
             block_id=cand.block_id,
             segment_id=cand.segment_id,
+            old_text_sha256=cand.old_text_sha256,
             current_text=cand.old_text,
             candidate_reason=cand.reason,
         )
@@ -351,7 +415,28 @@ def run_ocr_correction(
             )
         except Exception as exc:
             logger.warning("OCR inference failed for segment %s: %s", cand.segment_id, exc)
+            audits.append(
+                OCRAuditRecord(
+                    block_id=cand.block_id,
+                    segment_id=cand.segment_id,
+                    page_idx=cand.page_idx,
+                    bbox=bbox,
+                    old_text=cand.old_text,
+                    new_text=cand.old_text,
+                    old_sha256=cand.old_text_sha256,
+                    new_sha256=cand.old_text_sha256,
+                    provider=provider.name,
+                    model=provider.model,
+                    request_ids=[req_id],
+                    first_confidence=0.0,
+                    visible_error_type="no_clear_error",
+                    mode=mode,
+                    status="rejected",
+                    rejection_reasons=[f"OCR proposal provider inference failed: {exc}"],
+                )
+            )
             continue
+
 
         # Enforce candidate identity binding:
         # proposal.block_id == candidate.block_id
