@@ -5,6 +5,7 @@ from book2epub.qa.models import (
     EvaluationMetrics,
     PageQASummary,
     QAReportData,
+    QAViolation,
     StructuralCheckResult,
 )
 from book2epub.qa.report import generate_qa_report
@@ -16,6 +17,7 @@ __all__ = [
     "EvaluationMetrics",
     "PageQASummary",
     "QAReportData",
+    "QAViolation",
     "StructuralCheckResult",
     "StageRecord",
     "StageState",

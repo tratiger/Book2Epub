@@ -18,6 +18,7 @@ from book2epub.ir.models import (
     InlineMath,
     IRWarning,
     Paragraph,
+    PreformattedBlock,
     Table,
 )
 from book2epub.presentation.css_generator import generate_book_css
@@ -303,7 +304,9 @@ class ReflowRenderer:
         figure_count = sum(1 for b in bookir.blocks if isinstance(b, Figure))
         chart_count = sum(1 for b in bookir.blocks if isinstance(b, Chart))
         table_count = sum(1 for b in bookir.blocks if isinstance(b, Table))
-        code_count = sum(1 for b in bookir.blocks if isinstance(b, CodeBlock))
+        code_count = sum(
+            1 for b in bookir.blocks if isinstance(b, (CodeBlock, PreformattedBlock))
+        )
         display_math_count = sum(1 for b in bookir.blocks if isinstance(b, DisplayMath))
         inline_math_count = 0
         for b in bookir.blocks:

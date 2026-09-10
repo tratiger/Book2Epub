@@ -46,19 +46,125 @@ class EvaluationMetrics:
 
 
 @dataclass
-class PreservationLedgerEntry:
-    """Disposition accounting record for a source evidence block (Appendix N2)."""
+class QAViolation:
+    """A specific quality or safety violation recorded during QA evaluation."""
 
-    block_id: str
+    category: str
+    # category: "semantic", "preservation", "ocr", "presentation", "outline", "render", "package"
+    severity: str  # "fatal", "error", "warning", "info"
+    code: str
+    message: str
+    block_id: str | None = None
+    page_idx: int | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+class DispositionStr(str):
+    """String subclass that allows backward-compatible disposition comparisons."""
+
+    _ALIASES: dict[str, str] = {
+        "unchanged": "preserved_same_type",
+        "preserved_same_type": "unchanged",
+        "retyped": "preserved_retyped",
+        "preserved_retyped": "retyped",
+        "intentionally_suppressed_boilerplate": "suppressed_boilerplate",
+        "suppressed_boilerplate": "intentionally_suppressed_boilerplate",
+        "semantically_superseded": "preserved_semantic_supersession",
+        "preserved_semantic_supersession": "semantically_superseded",
+    }
+
+    def __eq__(self, other: object) -> bool:
+        if super().__eq__(other):
+            return True
+        if isinstance(other, str):
+            return self._ALIASES.get(str(self)) == other
+        return False
+
+    def __hash__(self) -> int:
+        return super().__hash__()
+
+
+@dataclass
+class PreservationLedgerEntry:
+    """Disposition accounting record for a source evidence block (Appendix N2, M12 hardening)."""
+
+    source_block_id: str
     source_kind: str
-    final_kind: str
     source_content_sha256: str
-    final_content_sha256: str | None = None
-    disposition: str = "preserved_same_type"
+    final_block_ids: list[str] = field(default_factory=list)
+    final_kinds: list[str] = field(default_factory=list)
+    final_content_sha256s: list[str] = field(default_factory=list)
+    disposition: DispositionStr = field(default_factory=lambda: DispositionStr("unchanged"))
     source_asset_ids: list[str] = field(default_factory=list)
     final_asset_ids: list[str] = field(default_factory=list)
     semantic_decision_ids: list[str] = field(default_factory=list)
     ocr_correction_ids: list[str] = field(default_factory=list)
+    reason: str = ""
+
+    def __init__(
+        self,
+        source_block_id: str = "",
+        source_kind: str = "unknown",
+        source_content_sha256: str = "",
+        final_block_ids: list[str] | None = None,
+        final_kinds: list[str] | None = None,
+        final_content_sha256s: list[str] | None = None,
+        disposition: str = "unchanged",
+        source_asset_ids: list[str] | None = None,
+        final_asset_ids: list[str] | None = None,
+        semantic_decision_ids: list[str] | None = None,
+        ocr_correction_ids: list[str] | None = None,
+        reason: str = "",
+        # Backward-compatibility arguments:
+        block_id: str | None = None,
+        final_kind: str | None = None,
+        final_content_sha256: str | None = None,
+    ) -> None:
+        self.source_block_id = source_block_id or block_id or ""
+        self.source_kind = source_kind
+        self.source_content_sha256 = source_content_sha256
+        if final_block_ids is not None:
+            self.final_block_ids = final_block_ids
+        elif block_id:
+            self.final_block_ids = [block_id]
+        else:
+            self.final_block_ids = []
+
+        if final_kinds is not None:
+            self.final_kinds = final_kinds
+        elif final_kind is not None and final_kind != "none":
+            self.final_kinds = [final_kind]
+        else:
+            self.final_kinds = []
+
+        if final_content_sha256s is not None:
+            self.final_content_sha256s = final_content_sha256s
+        elif final_content_sha256 is not None:
+            self.final_content_sha256s = [final_content_sha256]
+        else:
+            self.final_content_sha256s = []
+
+        self.disposition = DispositionStr(disposition)
+        self.source_asset_ids = source_asset_ids or []
+        self.final_asset_ids = final_asset_ids or []
+        self.semantic_decision_ids = semantic_decision_ids or []
+        self.ocr_correction_ids = ocr_correction_ids or []
+        self.reason = reason
+
+    @property
+    def block_id(self) -> str:
+        """Alias for backward compatibility."""
+        return self.source_block_id
+
+    @property
+    def final_kind(self) -> str:
+        """Single-kind alias for backward compatibility."""
+        return self.final_kinds[0] if self.final_kinds else "none"
+
+    @property
+    def final_content_sha256(self) -> str | None:
+        """Single-hash alias for backward compatibility."""
+        return self.final_content_sha256s[0] if self.final_content_sha256s else None
 
 
 @dataclass
@@ -77,6 +183,9 @@ class SemanticQAMetrics:
     outline_coverage_rate: float = 1.0
     heading_level_change_count: int = 0
     outline_conflict_count: int = 0
+    outline_cycle_count: int = 0
+    outline_monotonic_error_count: int = 0
+    outline_unresolved_target_count: int = 0
 
 
 @dataclass
@@ -134,6 +243,7 @@ class QAReportData:
     metrics: EvaluationMetrics
     pages: list[PageQASummary] = field(default_factory=list)
     preservation_ledger: list[PreservationLedgerEntry] = field(default_factory=list)
+    violations: list[QAViolation] = field(default_factory=list)
     semantic_metrics: SemanticQAMetrics | None = None
     ocr_metrics: OCRQAMetrics | None = None
     presentation_metrics: PresentationQAMetrics | None = None

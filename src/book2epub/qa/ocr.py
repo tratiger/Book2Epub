@@ -36,43 +36,110 @@ def evaluate_ocr_qa(
     if isinstance(data, dict) and "audits" in data:
         try:
             audit_file = OCRCorrectionAuditFile.model_validate(data)
-            metrics.eligible_segment_count = audit_file.eligible_segment_count
-            metrics.ocr_candidate_count = audit_file.candidate_count
-            metrics.ocr_proposal_count = len(audit_file.audits)
-            metrics.ocr_applied_count = audit_file.applied_count
-            metrics.ocr_rejected_count = audit_file.rejected_count
-            metrics.ocr_changed_codepoints = audit_file.changed_codepoints
-            metrics.ocr_budget_exceeded = audit_file.budget_exceeded
-            if audit_file.total_codepoints > 0:
-                metrics.ocr_changed_fraction = (
-                    audit_file.changed_codepoints / audit_file.total_codepoints
+        except Exception as e:
+            violations.append(f"OCRCorrectionAuditFile schema validation failed: {e}")
+            return metrics, violations
+
+        metrics.eligible_segment_count = audit_file.eligible_segment_count
+        metrics.ocr_candidate_count = audit_file.candidate_count
+        metrics.ocr_proposal_count = len(audit_file.audits)
+        metrics.ocr_applied_count = audit_file.applied_count
+        metrics.ocr_rejected_count = audit_file.rejected_count
+        metrics.ocr_changed_codepoints = audit_file.changed_codepoints
+        metrics.ocr_budget_exceeded = audit_file.budget_exceeded
+        if audit_file.total_codepoints > 0:
+            metrics.ocr_changed_fraction = (
+                audit_file.changed_codepoints / audit_file.total_codepoints
+            )
+
+        # Invariant: candidate count == applied + rejected == len(audits)
+        if audit_file.candidate_count != audit_file.applied_count + audit_file.rejected_count:
+            violations.append(
+                f"Candidate count ({audit_file.candidate_count}) != applied "
+                f"({audit_file.applied_count}) + rejected ({audit_file.rejected_count})"
+            )
+        if len(audit_file.audits) != audit_file.candidate_count:
+            violations.append(
+                f"Audits count ({len(audit_file.audits)}) != candidate count "
+                f"({audit_file.candidate_count})"
+            )
+
+        # Invariant: budget exceeded flag
+        if audit_file.budget_exceeded:
+            violations.append("OCR edit budget was exceeded during correction stage")
+
+        actual_changed_cps = 0
+        from book2epub.semantic.hashing import compute_text_sha256
+
+        for a in audit_file.audits:
+            if a.confirmation_result is not None:
+                if a.status == "applied":
+                    metrics.ocr_sensitive_confirmation_count += 1
+                else:
+                    metrics.ocr_confirmation_disagreement_count += 1
+
+            # Invariant: mode == "off" must never apply
+            if cfg_mode == "off" and a.status == "applied":
+                violations.append(
+                    f"OCR mode is off but proposal for block '{a.block_id}' was applied"
                 )
 
-            for a in audit_file.audits:
-                if a.confirmation_result is not None:
-                    if a.status == "applied":
-                        metrics.ocr_sensitive_confirmation_count += 1
-                    else:
-                        metrics.ocr_confirmation_disagreement_count += 1
+            if a.status == "applied":
+                # Compute changed codepoints
+                diff = abs(len(a.new_text) - len(a.old_text)) + sum(
+                    1 for x, y in zip(a.old_text, a.new_text, strict=False) if x != y
+                )
+                actual_changed_cps += diff
 
-                # Invariant: mode == "off" must never apply
-                if cfg_mode == "off" and a.status == "applied":
+                # Hash resolution check
+                if compute_text_sha256(a.old_text) != a.old_sha256:
                     violations.append(
-                        f"OCR mode is off but proposal for block '{a.block_id}' was applied"
+                        f"Applied OCR proposal old text SHA-256 mismatch "
+                        f"for segment '{a.segment_id}'"
+                    )
+                if compute_text_sha256(a.new_text) != a.new_sha256:
+                    violations.append(
+                        f"Applied OCR proposal new text SHA-256 mismatch "
+                        f"for segment '{a.segment_id}'"
                     )
 
-                # Invariant: math source text is immutable
+                # Visual bbox/page evidence check
+                if not a.bbox or len(a.bbox) < 4 or a.page_idx < 0:
+                    violations.append(
+                        f"Applied OCR proposal for segment '{a.segment_id}' "
+                        f"lacks visual bbox/page evidence"
+                    )
+
+                # Math source text is immutable
                 if "math" in a.block_id.lower() or "math" in a.segment_id.lower():
-                    if a.status == "applied":
-                        violations.append(
-                            f"Math text was illegally modified by OCR proposal for "
-                            f"block '{a.block_id}'"
-                        )
+                    violations.append(
+                        f"Math text was illegally modified by OCR proposal for block '{a.block_id}'"
+                    )
 
+                # Table HTML is immutable
+                is_table = "table" in a.block_id.lower()
+                is_caption_or_fn = "caption" in a.segment_id.lower() or "fn" in a.segment_id.lower()
+                if is_table and not is_caption_or_fn:
+                    violations.append(
+                        f"Table HTML was illegally modified by OCR proposal "
+                        f"for block '{a.block_id}'"
+                    )
 
-            return metrics, violations
-        except Exception as e:
-            logger.debug("Failed parsing as OCRCorrectionAuditFile, trying legacy: %s", e)
+                # Sensitive / code confirmation check
+                if a.confirmation_result is not None and a.confirmation_result is False:
+                    violations.append(
+                        f"OCR proposal for segment '{a.segment_id}' "
+                        f"was applied despite confirmation disagreement"
+                    )
+
+        # Changed codepoints accuracy check
+        if audit_file.changed_codepoints != actual_changed_cps:
+            violations.append(
+                f"Changed codepoints calculation mismatch: recorded "
+                f"{audit_file.changed_codepoints} != actual {actual_changed_cps}"
+            )
+
+        return metrics, violations
 
     # 2. Legacy schema support (e.g. dict with "proposals")
     proposals: list[dict[str, Any]] = (

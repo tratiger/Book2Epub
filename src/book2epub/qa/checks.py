@@ -144,13 +144,18 @@ def run_structural_checks(
         retyped_tables = sum(
             1
             for e in preservation_ledger
-            if e.source_kind == "table" and e.disposition == "preserved_retyped"
+            if e.source_kind == "table" and e.disposition in ("preserved_retyped", "retyped")
+        )
+        lost_tables = sum(
+            1
+            for e in preservation_ledger
+            if e.source_kind == "table" and e.disposition == "lost_error"
         )
         effective_tables = render_result.table_count + retyped_tables
-        table_passed = effective_tables >= source_table_count
+        table_passed = (effective_tables >= source_table_count) and (lost_tables == 0)
         table_details = (
             f"Rendered {render_result.table_count} tables + {retyped_tables} justified semantic "
-            f"retypes (source: {source_table_count})."
+            f"retypes (source: {source_table_count}, lost: {lost_tables})."
         )
     else:
         table_passed = render_result.table_count >= source_table_count
@@ -169,14 +174,39 @@ def run_structural_checks(
     )
 
     # Check 4: Code Reconciliation Check
-    code_passed = render_result.code_count >= source_code_count
+    if is_semantic and preservation_ledger:
+        retyped_code = sum(
+            1
+            for e in preservation_ledger
+            if e.source_kind in ("code", "algorithm")
+            and e.disposition in (
+                "preserved_same_type",
+                "unchanged",
+                "preserved_retyped",
+                "retyped",
+                "moved_into_container",
+            )
+            and any(k in ("code", "preformatted") for k in e.final_kinds)
+        )
+        effective_code = max(render_result.code_count, retyped_code)
+        code_passed = effective_code >= source_code_count
+        code_details = (
+            f"Rendered {render_result.code_count} code components + justified semantic "
+            f"retypes (effective: {effective_code}, source: {source_code_count})."
+        )
+        target_code_count = effective_code
+    else:
+        code_passed = render_result.code_count >= source_code_count
+        code_details = f"Rendered {render_result.code_count} code (source: {source_code_count})."
+        target_code_count = render_result.code_count
+
     checks.append(
         StructuralCheckResult(
             name="Code Reconciliation Check",
             passed=code_passed,
             source_count=source_code_count,
-            target_count=render_result.code_count,
-            details=f"Rendered {render_result.code_count} code (source: {source_code_count}).",
+            target_count=target_code_count,
+            details=code_details,
         )
     )
     # Check 5: Heading Hierarchy Check
@@ -216,7 +246,7 @@ def run_structural_checks(
         else 1.0
     )
     code_text_rate = (
-        min(1.0, render_result.code_count / max(1, source_code_count))
+        min(1.0, target_code_count / max(1, source_code_count))
         if source_code_count > 0
         else 1.0
     )

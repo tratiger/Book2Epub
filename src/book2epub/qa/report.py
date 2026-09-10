@@ -46,6 +46,7 @@ def generate_qa_report(
     semantic_metrics: SemanticQAMetrics | None = None,
     ocr_metrics: OCRQAMetrics | None = None,
     presentation_metrics: PresentationQAMetrics | None = None,
+    violations: list[Any] | None = None,
 ) -> QAReportData:
     """Generate comprehensive JSON and standalone HTML QA reports for a conversion job."""
     # 1. Environment & Dependency info
@@ -179,6 +180,7 @@ def generate_qa_report(
         metrics=metrics,
         pages=pages_qa,
         preservation_ledger=preservation_ledger or [],
+        violations=violations or [],
         semantic_metrics=semantic_metrics,
         ocr_metrics=ocr_metrics,
         presentation_metrics=presentation_metrics,
@@ -313,6 +315,38 @@ def _render_qa_html(qa: QAReportData) -> str:
     </div>
     """
 
+    violations_section = ""
+    if qa.violations:
+        viol_rows = []
+        for v in qa.violations:
+            sev = getattr(v, "severity", "warning").lower()
+            sev_cls = "badge-fail" if sev in ("fatal", "error") else "badge-warn"
+            block_id = getattr(v, "block_id", None)
+            page_idx = getattr(v, "page_idx", None)
+            scope = f"Block: {block_id or 'N/A'}"
+            if page_idx is not None:
+                scope += f" (p.{page_idx + 1})"
+            viol_rows.append(
+                f"<tr>"
+                f'<td><span class="badge {sev_cls}">{sev.upper()}</span></td>'
+                f"<td><code>{getattr(v, 'category', '')}</code></td>"
+                f"<td><strong>{getattr(v, 'code', '')}</strong></td>"
+                f"<td>{scope}</td>"
+                f"<td>{getattr(v, 'message', '')}</td>"
+                f"</tr>"
+            )
+        violations_section = f"""
+    <h2>QA Safety & Release Invariant Violations</h2>
+    <table>
+      <thead>
+        <tr><th>Severity</th><th>Category</th><th>Code</th><th>Scope</th><th>Reason</th></tr>
+      </thead>
+      <tbody>
+        {''.join(viol_rows)}
+      </tbody>
+    </table>
+    """
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -371,6 +405,8 @@ def _render_qa_html(qa: QAReportData) -> str:
     }}
     .badge-pass {{ background: #dcfce7; color: #166534; }}
     .badge-fail {{ background: #fee2e2; color: #991b1b; }}
+    .badge-warn {{ background: #fef08a; color: #854d0e; }}
+    .badge-info {{ background: #e0f2fe; color: #0369a1; }}
   </style>
 </head>
 <body>
@@ -379,6 +415,8 @@ def _render_qa_html(qa: QAReportData) -> str:
       <h1>Book2Epub QA Diagnostic Report</h1>
       <p>Job ID: <code>{qa.job_id}</code> | Generated: {qa.timestamp_utc} (UTC)</p>
     </div>
+
+    {violations_section}
 
     <h2>Structural Quality & Losslessness Metrics</h2>
     <div class="grid">

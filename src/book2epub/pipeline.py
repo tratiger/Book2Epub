@@ -28,7 +28,7 @@ from book2epub.mineru.validate import (
 )
 from book2epub.package import EpubPackager, PackagingResult
 from book2epub.paths import JobPaths, create_job_paths, get_epubcheck_jar_path
-from book2epub.qa import QAReportData, generate_qa_report
+from book2epub.qa import QAReportData, QAViolation, generate_qa_report
 from book2epub.render import ReflowRenderer, RenderResult
 from book2epub.util.hashing import compute_mineru_cache_key
 
@@ -438,6 +438,15 @@ def run_conversion_m5(
     with raw_middle_path.open("r", encoding="utf-8") as f:
         raw_middle_data = json.load(f)
 
+    # Use final rendered typography-normalized BookIR when available
+    if paths.ir_typography_json.is_file():
+        try:
+            from book2epub.ir.serializer import load_bookir
+
+            book_ir = load_bookir(paths.ir_typography_json)
+        except Exception:
+            pass
+
     evidence = None
     if paths.semantic_evidence_json.is_file():
         from book2epub.semantic.models import SemanticEvidenceBook
@@ -456,20 +465,87 @@ def run_conversion_m5(
         elif isinstance(applied_data, dict):
             audits = [SemanticAuditRecord.model_validate(a) for a in applied_data.get("audits", [])]
 
+    ocr_audits = None
+    if paths.semantic_ocr_corrections_json.is_file():
+        try:
+            from book2epub.visual.models import OCRCorrectionAuditFile
+
+            ocr_raw = json.loads(paths.semantic_ocr_corrections_json.read_text(encoding="utf-8"))
+            if isinstance(ocr_raw, dict) and "audits" in ocr_raw:
+                ocr_audits = OCRCorrectionAuditFile.model_validate(ocr_raw).audits
+        except Exception:
+            pass
+
+    outline = None
+    outline_violations: list[QAViolation] = []
+    if paths.semantic_outline_json.is_file():
+        from book2epub.semantic.structure import BookOutline
+
+        try:
+            outline = BookOutline.model_validate_json(
+                paths.semantic_outline_json.read_text(encoding="utf-8")
+            )
+            from book2epub.qa.semantic import evaluate_outline_qa
+
+            _, outline_violations = evaluate_outline_qa(
+                outline,
+                book_ir,
+                oebps_dir=paths.render_oebps_dir,
+                toc_entries=render_result.manifest.toc,
+            )
+        except Exception as e:
+            outline_violations.append(
+                QAViolation(
+                    category="outline",
+                    severity="error",
+                    code="OUTLINE_PARSE_ERROR",
+                    message=f"Failed to parse outline JSON: {e}",
+                )
+            )
+
     from book2epub.qa.ocr import evaluate_ocr_qa
     from book2epub.qa.presentation import evaluate_presentation_qa
     from book2epub.qa.semantic import (
         build_preservation_ledger,
+        evaluate_preservation_qa,
         evaluate_semantic_transitions,
     )
 
-    preservation_ledger = build_preservation_ledger(evidence, book_ir, audits)
-    semantic_metrics = evaluate_semantic_transitions(evidence, book_ir, audits)
-    ocr_metrics, _ = evaluate_ocr_qa(paths.semantic_ocr_corrections_json, cfg.ocr_correction.mode)
-    presentation_metrics, _ = evaluate_presentation_qa(
+    preservation_ledger = build_preservation_ledger(
+        evidence, book_ir, audits, ocr_audits=ocr_audits
+    )
+    preservation_violations = evaluate_preservation_qa(preservation_ledger, evidence, book_ir)
+    semantic_metrics = evaluate_semantic_transitions(evidence, book_ir, audits, outline=outline)
+    ocr_metrics, ocr_warns = evaluate_ocr_qa(
+        paths.semantic_ocr_corrections_json, cfg.ocr_correction.mode
+    )
+    ocr_violations = [
+        QAViolation(
+            category="ocr",
+            severity="fatal",
+            code="OCR_INVARIANT_VIOLATION",
+            message=w,
+        )
+        for w in ocr_warns
+    ]
+
+    presentation_metrics, pres_warns = evaluate_presentation_qa(
         oebps_dir=paths.render_oebps_dir,
         manifest=render_result.manifest,
         mode=cfg.presentation.mode,
+    )
+    pres_violations = [
+        QAViolation(
+            category="presentation",
+            severity="fatal" if "forbidden" in w.lower() else "error",
+            code="PRESENTATION_VIOLATION",
+            message=w,
+        )
+        for w in pres_warns
+    ]
+
+    all_violations: list[QAViolation] = (
+        preservation_violations + ocr_violations + pres_violations + outline_violations
     )
 
     qa_data = generate_qa_report(
@@ -486,8 +562,28 @@ def run_conversion_m5(
         semantic_metrics=semantic_metrics,
         ocr_metrics=ocr_metrics,
         presentation_metrics=presentation_metrics,
+        violations=all_violations,
     )
     packaging_result.qa_report_path = paths.qa_report_html
+
+    # Strict QA Release Gate Enforcement
+    if cfg.app.strict:
+        fatal_errors = [v for v in all_violations if v.severity in ("fatal", "error")]
+        failed_checks = [c for c in qa_data.structural_checks if not c.passed]
+        if fatal_errors or failed_checks:
+            err_msgs = [f"[{v.category.upper()}] {v.message}" for v in fatal_errors]
+            err_msgs.extend([f"[CHECK] {c.name}: {c.details}" for c in failed_checks])
+            summary = "\n".join(f"  - {m}" for m in err_msgs)
+            logger.error(
+                "Strict QA release gate failed with %d fatal/error issue(s):\n%s",
+                len(err_msgs),
+                summary,
+            )
+            raise RuntimeError(
+                f"Strict QA release gate failed with {len(err_msgs)} issue(s):\n{summary}\n"
+                f"Diagnostic report saved at: {paths.qa_report_html}"
+            )
+
     logger.info("=== Milestone M5 Complete: QA report at %s ===", paths.qa_report_html)
     return qa_data
 
