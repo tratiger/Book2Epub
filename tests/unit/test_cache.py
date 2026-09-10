@@ -7,8 +7,9 @@ from book2epub.cache import (
     hash_bookir_relevant,
     materialize_global_stage_cache,
     persist_global_stage_cache,
+    rebase_cached_bookir_blocks,
 )
-from book2epub.ir.models import Asset, BookIR, SourceDocument
+from book2epub.ir.models import Asset, BookIR, Paragraph, SourceDocument, Text
 
 
 def _bookir_with_asset(path: Path) -> BookIR:
@@ -33,6 +34,19 @@ def test_bookir_hash_ignores_job_local_asset_path(tmp_path: Path) -> None:
     first = hash_bookir_relevant(_bookir_with_asset(tmp_path / "job-a" / "image.png"))
     second = hash_bookir_relevant(_bookir_with_asset(tmp_path / "job-b" / "image.png"))
     assert first == second
+
+
+def test_cached_bookir_rebase_retains_current_run_asset_path(tmp_path: Path) -> None:
+    current = _bookir_with_asset(tmp_path / "job-b" / "image.png").model_copy(
+        update={"blocks": [Paragraph(id="current", inlines=[Text(text="current")])]}
+    )
+    cached = _bookir_with_asset(tmp_path / "job-a" / "image.png").model_copy(
+        update={"blocks": [Paragraph(id="cached", inlines=[Text(text="cached")])]}
+    )
+
+    rebased = rebase_cached_bookir_blocks(current, cached)
+    assert rebased.blocks[0].id == "cached"
+    assert rebased.assets["asset-1"].source_path == tmp_path / "job-b" / "image.png"
 
 
 def test_global_stage_cache_materializes_into_a_different_job(tmp_path: Path) -> None:

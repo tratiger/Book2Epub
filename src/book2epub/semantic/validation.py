@@ -14,7 +14,10 @@ across chunks, which would silently corrupt the BookIR.
 import logging
 from collections import Counter
 
-from book2epub.semantic.book_state import BookStateObservationBatch
+from book2epub.semantic.book_state import (
+    BookStateObservationBatch,
+    detect_numbering_family,
+)
 from book2epub.semantic.chunking import SemanticChunkInput
 from book2epub.semantic.decisions import SemanticDecisionBatch
 from book2epub.semantic.structure import StructureDecisionBatch
@@ -299,9 +302,16 @@ def validate_book_state_observation_scope(
         }
         if not kind_matches.get(kind, False):
             return ""
-        return str(
+        caption = str(
             getattr(block, "caption_text", None)
             or getattr(block, "caption_preview", None)
+            or ""
+        )
+        if caption or kind not in {"example", "exercise"}:
+            return caption
+        return str(
+            getattr(block, "plain_text", None)
+            or getattr(block, "text_preview", None)
             or ""
         )
 
@@ -319,6 +329,11 @@ def validate_book_state_observation_scope(
                     f"BookState observation numbering_conventions label={example.label!r} "
                     f"is not verbatim in source block {example.block_id!r}"
                 )
+            elif detect_numbering_family(example.label)[1] != item.family:
+                violations.append(
+                    f"BookState observation numbering_conventions family={item.family!r} "
+                    f"does not match source label {example.label!r}"
+                )
 
         for label in item.example_labels:
             if not any(
@@ -328,6 +343,11 @@ def validate_book_state_observation_scope(
                 violations.append(
                     f"BookState observation numbering_conventions label={label!r} "
                     f"is not verbatim in a scoped {item.kind} source block"
+                )
+            elif detect_numbering_family(label)[1] != item.family:
+                violations.append(
+                    f"BookState observation numbering_conventions family={item.family!r} "
+                    f"does not match source label {label!r}"
                 )
 
     for item in observation.domain_terms:

@@ -15,6 +15,7 @@ from book2epub.cache import (
     hash_model_without_job_paths,
     materialize_global_stage_cache,
     persist_global_stage_cache,
+    rebase_cached_bookir_blocks,
     stable_hash,
     stage_cache_hit,
 )
@@ -329,7 +330,11 @@ def run_conversion_m2(
                         paths.semantic_visual_stage_json, visual_key, visual_outputs
                     )
                 if visual_cache_hit:
-                    semantic_ir = load_bookir(paths.semantic_visual_ir_json)
+                    cached_visual_ir = load_bookir(paths.semantic_visual_ir_json)
+                    # The cached BookIR may contain asset paths from another job.
+                    # Reuse only visual-stage blocks and retain this run's root,
+                    # metadata, and assets.
+                    semantic_ir = rebase_cached_bookir_blocks(semantic_ir, cached_visual_ir)
                     visual_payload = json.loads(
                         paths.semantic_visual_audits_json.read_text(encoding="utf-8")
                     )
@@ -492,7 +497,10 @@ def run_conversion_m2(
                 (paths.ir_corrected_json, paths.semantic_ocr_corrections_json),
             )
         if ocr_cache_hit:
-            corrected_ir = load_bookir(paths.ir_corrected_json)
+            cached_corrected_ir = load_bookir(paths.ir_corrected_json)
+            # OCR cache artifacts can come from a different job.  Keep current
+            # run asset/source paths and apply only cached corrected blocks.
+            corrected_ir = rebase_cached_bookir_blocks(semantic_ir, cached_corrected_ir)
             record_stage_status(
                 paths.semantic_ocr_stage_json,
                 "ocr_correction",

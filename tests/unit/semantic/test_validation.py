@@ -123,6 +123,63 @@ def test_numbering_observation_rejects_bad_block_and_hallucinated_label() -> Non
     assert any("図8.8" in violation for violation in violations)
 
 
+def test_numbering_family_must_match_source_label() -> None:
+    chunk = SemanticChunkInput(
+        chunk_id="sem-numbering-family",
+        block_ids=["fig-1"],
+        blocks=[
+            DraftBlock(
+                block_id="fig-1",
+                current_kind="figure",
+                caption_text="図1.3 構成",
+            )
+        ],
+    )
+    observation = BookStateObservationBatch(
+        chunk_id=chunk.chunk_id,
+        numbering_conventions=[
+            NumberingConventionObservation(
+                kind="figure",
+                family="global",
+                examples=[NumberingConventionExample(block_id="fig-1", label="図1.3")],
+                confidence=0.9,
+            )
+        ],
+    )
+
+    assert any(
+        "does not match source label" in violation
+        for violation in validate_book_state_observation_scope(observation, chunk)
+    )
+
+
+def test_example_numbering_uses_plain_text_fallback_for_label_grounding() -> None:
+    chunk = SemanticChunkInput(
+        chunk_id="sem-example-label",
+        block_ids=["example-1"],
+        blocks=[
+            DraftBlock(
+                block_id="example-1",
+                current_kind="example",
+                plain_text="例4 サンプル",
+            )
+        ],
+    )
+    observation = BookStateObservationBatch(
+        chunk_id=chunk.chunk_id,
+        numbering_conventions=[
+            NumberingConventionObservation(
+                kind="example",
+                family="global",
+                examples=[NumberingConventionExample(block_id="example-1", label="例4")],
+                confidence=0.9,
+            )
+        ],
+    )
+
+    assert validate_book_state_observation_scope(observation, chunk) == []
+
+
 # ---------------------------------------------------------------------------
 # Test H: Out-of-scope block_id filtering
 # ---------------------------------------------------------------------------

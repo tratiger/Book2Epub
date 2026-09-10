@@ -44,6 +44,11 @@ def hash_bookir_relevant(bookir: Any) -> str:
     return stable_hash(payload)
 
 
+def rebase_cached_bookir_blocks(current_bookir: Any, cached_bookir: Any) -> Any:
+    """Apply cached stage blocks while retaining current-run root/assets."""
+    return current_bookir.model_copy(update={"blocks": cached_bookir.blocks})
+
+
 def compute_semantic_cache_key(
     *,
     evidence: Any,

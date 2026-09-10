@@ -495,11 +495,15 @@ def merge_book_state_observations(
     # as supplied by source evidence; no numbering is generated here.
     for num_obs in obs.numbering_conventions:
         labels = source_grounded_numbering_labels(num_obs)
+        deterministic_families = {detect_numbering_family(label)[1] for label in labels}
+        if len(deterministic_families) != 1:
+            continue
+        deterministic_family = next(iter(deterministic_families))
         existing_num = next(
             (
                 item
                 for item in updated.numbering_conventions
-                if item.kind == num_obs.kind and item.family == num_obs.family
+                if item.kind == num_obs.kind and item.family == deterministic_family
             ),
             None,
         )
@@ -517,7 +521,7 @@ def merge_book_state_observations(
             updated.numbering_conventions.append(
                 NumberingConvention(
                     kind=num_obs.kind,
-                    family=num_obs.family,
+                    family=deterministic_family,
                     example_labels=labels[:8],
                     confidence=num_obs.confidence,
                 )
