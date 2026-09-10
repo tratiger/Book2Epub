@@ -14,7 +14,7 @@ from book2epub.providers.models import (
     StructuredInferenceRequest,
     StructuredInferenceResult,
 )
-from book2epub.providers.retry import execute_with_retry
+from book2epub.providers.retry import execute_with_retry_detailed
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-sol"
 
@@ -88,8 +88,12 @@ class OpenAIProvider:
                 store=False,
             )
 
-        resp = execute_with_retry(_call_openai, provider_name=self.name)
-        latency_ms = int((time.perf_counter() - start_time) * 1000)
+        first_execution = execute_with_retry_detailed(_call_openai, provider_name=self.name)
+        resp = first_execution.value
+        transport_attempt_count = first_execution.attempt_count
+        response_objects = [resp]
+        adopted_request_id = request.request_id
+        schema_retry_count = 0
 
         # Check completed status
         resp_status = getattr(resp, "status", "completed")
@@ -108,10 +112,18 @@ class OpenAIProvider:
         except Exception as first_val_err:
             retry_req_id = f"{request.request_id}-schema-retry"
             try:
-                resp_retry = execute_with_retry(_call_openai, provider_name=self.name)
+                schema_retry_count = 1
+                retry_execution = execute_with_retry_detailed(
+                    _call_openai, provider_name=self.name
+                )
+                resp_retry = retry_execution.value
+                response_objects.append(resp_retry)
+                transport_attempt_count += retry_execution.attempt_count
+                resp = resp_retry
                 raw_text = getattr(resp_retry, "output_text", "")
                 parsed_json = json.loads(raw_text)
                 validated_obj = response_model.model_validate(parsed_json)
+                adopted_request_id = retry_req_id
             except Exception as final_val_err:
                 raise ProviderError(
                     f"OpenAI response failed local Pydantic validation: {final_val_err}",
@@ -122,20 +134,53 @@ class OpenAIProvider:
         in_tok = getattr(usage_obj, "input_tokens", None) if usage_obj else None
         out_tok = getattr(usage_obj, "output_tokens", None) if usage_obj else None
         resp_id = getattr(resp, "id", None)
+        provider_request_ids = [
+            response_id
+            for response in response_objects
+            if isinstance(response_id := getattr(response, "id", None), str)
+        ]
+        final_in = in_tok if isinstance(in_tok, int) else None
+        final_out = out_tok if isinstance(out_tok, int) else None
+        total_in = sum(
+            value
+            for response in response_objects
+            if isinstance(
+                value := getattr(getattr(response, "usage", None), "input_tokens", None),
+                int,
+            )
+        )
+        total_out = sum(
+            value
+            for response in response_objects
+            if isinstance(
+                value := getattr(getattr(response, "usage", None), "output_tokens", None),
+                int,
+            )
+        )
+        latency_ms = int((time.perf_counter() - start_time) * 1000)
         usage = ProviderUsage(
-            input_tokens=in_tok if isinstance(in_tok, int) else None,
-            output_tokens=out_tok if isinstance(out_tok, int) else None,
+            input_tokens=final_in,
+            output_tokens=final_out,
             raw_provider_request_id=resp_id if isinstance(resp_id, str) else None,
+            provider_request_ids=provider_request_ids,
+            total_input_tokens=total_in or None,
+            total_output_tokens=total_out or None,
+            attempt_count=transport_attempt_count,
+            schema_retry_count=schema_retry_count,
         )
 
         result = StructuredInferenceResult(
-            request_id=request.request_id,
+            request_id=adopted_request_id,
             provider=self.name,
             model=self.model,
             raw_text=raw_text,
             parsed_json=parsed_json,
             usage=usage,
             latency_ms=latency_ms,
+            attempt_count=transport_attempt_count,
+            transport_attempt_count=transport_attempt_count,
+            schema_retry_count=schema_retry_count,
+            provider_request_ids=provider_request_ids,
         )
 
         return validated_obj, result

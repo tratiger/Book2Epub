@@ -1,5 +1,7 @@
 """Unit tests for ComponentDocumentRenderer and legacy compatibility bridge (M10)."""
 
+import pytest
+
 from book2epub.ir.assets import AssetRegistry
 from book2epub.ir.models import (
     BlockQuote,
@@ -128,6 +130,33 @@ def test_terminal_remains_text_not_table() -> None:
     assert "<img" not in text
     assert "systemctl status" in text
     assert '<pre class="preformatted terminal-session">' in text
+
+
+@pytest.mark.parametrize(
+    "subtype",
+    [
+        "source_code",
+        "shell_command",
+        "terminal_output",
+        "terminal_session",
+        "repl_session",
+        "log_output",
+        "config_file",
+        "generic_preformatted",
+    ],
+)
+def test_component_counts_preserve_every_canonical_preformatted_subtype(subtype: str) -> None:
+    renderer = ComponentDocumentRenderer(
+        doc_href="text/part-0001.xhtml",
+        doc_id="part-0001",
+        title="Subtype Test",
+        language="en",
+        registry=AssetRegistry(),
+        profile=DEFAULT_ENHANCED_PROFILE,
+    )
+    renderer.render_block(PreformattedBlock(id=f"pre-{subtype}", text="x", subtype=subtype))
+
+    assert renderer.component_counts[f"preformatted_{subtype}"] == 1
 
 
 def test_legacy_bridge_compatibility() -> None:

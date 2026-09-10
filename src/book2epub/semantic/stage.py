@@ -336,11 +336,16 @@ def run_semantic_reconstruction(
         _record_provider_usage(
             paths,
             {
-                "request_id": req.request_id,
+                "request_id": inf_res.request_id,
+                "requested_request_id": req.request_id,
                 "provider": provider.name,
                 "model": provider.model,
                 "pass": "pass_a",
                 "latency_ms": inf_res.latency_ms,
+                "attempt_count": inf_res.attempt_count,
+                "transport_attempt_count": inf_res.transport_attempt_count,
+                "schema_retry_count": inf_res.schema_retry_count,
+                "provider_request_ids": inf_res.provider_request_ids,
                 "usage": inf_res.usage.model_dump(),
             },
         )
@@ -467,11 +472,16 @@ def run_semantic_reconstruction(
         _record_provider_usage(
             paths,
             {
-                "request_id": req.request_id,
+                "request_id": inf_b.request_id,
+                "requested_request_id": req.request_id,
                 "provider": provider.name,
                 "model": provider.model,
                 "pass": "pass_b",
                 "latency_ms": inf_b.latency_ms,
+                "attempt_count": inf_b.attempt_count,
+                "transport_attempt_count": inf_b.transport_attempt_count,
+                "schema_retry_count": inf_b.schema_retry_count,
+                "provider_request_ids": inf_b.provider_request_ids,
                 "usage": inf_b.usage.model_dump(),
             },
         )

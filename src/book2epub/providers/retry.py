@@ -4,10 +4,18 @@ import logging
 import random
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from book2epub.errors import ProviderError
 
 logger = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class RetryExecution[T]:
+    """Successful transport result plus the number of network attempts."""
+
+    value: T
+    attempt_count: int
 
 
 def is_transient_error(e: Exception) -> bool:
@@ -62,11 +70,26 @@ def execute_with_retry[T](
     Execute a provider network call with bounded exponential backoff on transient errors
     (M7 spec Section 8, Appendix G9).
     """
+    return execute_with_retry_detailed(
+        func,
+        provider_name=provider_name,
+        max_attempts=max_attempts,
+        initial_backoff=initial_backoff,
+    ).value
+
+
+def execute_with_retry_detailed[T](
+    func: Callable[[], T],
+    provider_name: str,
+    max_attempts: int = 3,
+    initial_backoff: float = 2.0,
+) -> RetryExecution[T]:
+    """Bounded transport retry with an auditable attempt count."""
     last_error: Exception | None = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            return func()
+            return RetryExecution(value=func(), attempt_count=attempt)
         except Exception as e:
             last_error = e
             if not is_transient_error(e) or attempt == max_attempts:

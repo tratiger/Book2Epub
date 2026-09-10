@@ -125,7 +125,7 @@ $env:OPENAI_API_KEY = "your-api-key"
 uv run book2epub convert .\pages -o book.epub `
   --semantic `
   --semantic-provider openai `
-  --semantic-model gpt-5.6-sol `
+  --semantic-model <model-id> `
   --allow-cloud `
   --semantic-vision auto `
   --presentation infer
@@ -174,9 +174,9 @@ uv run book2epub from-middle ".work\jobs\<job-id>\mineru\book_middle.json" -o ou
 | `--semantic` / `--no-semantic` | boolean | LLMによる高度な文書構造認識・階層調停の有効/無効。 |
 | `--presentation` | `legacy` / `enhanced` / `infer` | デザイン適用モード。`legacy`（標準CSS）、`enhanced`（高品位CSS）、`infer`（原本画像からスタイルを自動判定）。 |
 | `--ocr-correction` | `off` / `safe` / `all` | OCR誤字脱字補正。既定は `off`。`safe` は本文散文のみ視覚根拠に基づき補正。数式は常に不変。 |
-| `--semantic-provider` | `ollama` / `openai` / `gemini` / `anthropic` | モデルプロバイダの指定。 |
-| `--semantic-model` | string | 使用するモデル識別子。 |
-| `--semantic-vision` | `off` / `auto` / `always` | ビジョン認識機能の利用ポリシー。 |
+| `--semantic-provider` | `ollama` / `openai` / `google` / `anthropic` | canonical provider。CLIでは`gemini`も`google`のaliasとして利用可能。 |
+| `--semantic-model` | `<model-id>` | 使用するモデル識別子。特定モデル名には依存しない。 |
+| `--semantic-vision` | `off` / `auto` / `on` | canonical visual policy。CLIでは`always`も`on`のaliasとして利用可能。 |
 | `--allow-cloud` | flag | 外部クラウドAPIへのデータ送信を明示的に許可。 |
 
 ---

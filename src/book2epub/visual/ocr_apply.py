@@ -404,11 +404,16 @@ def run_ocr_correction(
             record_provider_usage(
                 paths,
                 {
-                    "request_id": req.request_id,
+                    "request_id": inf_res.request_id,
+                    "requested_request_id": req.request_id,
                     "provider": provider.name,
                     "model": provider.model,
                     "pass": "ocr_proposal",
                     "latency_ms": inf_res.latency_ms,
+                    "attempt_count": inf_res.attempt_count,
+                    "transport_attempt_count": inf_res.transport_attempt_count,
+                    "schema_retry_count": inf_res.schema_retry_count,
+                    "provider_request_ids": inf_res.provider_request_ids,
                     "usage": inf_res.usage.model_dump(),
                 },
             )
@@ -606,11 +611,16 @@ def run_ocr_correction(
                 record_provider_usage(
                     paths,
                     {
-                        "request_id": conf_req.request_id,
+                        "request_id": conf_inf_res.request_id,
+                        "requested_request_id": conf_req.request_id,
                         "provider": provider.name,
                         "model": provider.model,
                         "pass": "ocr_confirmation",
                         "latency_ms": conf_inf_res.latency_ms,
+                        "attempt_count": conf_inf_res.attempt_count,
+                        "transport_attempt_count": conf_inf_res.transport_attempt_count,
+                        "schema_retry_count": conf_inf_res.schema_retry_count,
+                        "provider_request_ids": conf_inf_res.provider_request_ids,
                         "usage": conf_inf_res.usage.model_dump(),
                     },
                 )

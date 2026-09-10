@@ -34,6 +34,11 @@ class ProviderUsage(BaseModel):
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
     raw_provider_request_id: str | None = None
+    provider_request_ids: list[str] = Field(default_factory=list)
+    total_input_tokens: int | None = None
+    total_output_tokens: int | None = None
+    attempt_count: int = 1
+    schema_retry_count: int = 0
 
 
 class StructuredInferenceResult(BaseModel):
@@ -46,6 +51,10 @@ class StructuredInferenceResult(BaseModel):
     parsed_json: dict[str, Any]
     usage: ProviderUsage
     latency_ms: int
+    attempt_count: int = 1
+    transport_attempt_count: int = 1
+    schema_retry_count: int = 0
+    provider_request_ids: list[str] = Field(default_factory=list)
 
 
 class ProviderUsageRecord(BaseModel):

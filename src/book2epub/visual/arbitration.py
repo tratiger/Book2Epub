@@ -7,6 +7,7 @@ from book2epub.ir.models import BookIR, Heading, Paragraph, Table
 from book2epub.paths import JobPaths
 from book2epub.providers.base import StructuredProvider
 from book2epub.providers.models import ImageInput, StructuredInferenceRequest
+from book2epub.providers.usage import record_provider_usage
 from book2epub.semantic.apply import (
     apply_semantic_decisions,
     apply_structure_decisions,
@@ -242,6 +243,22 @@ def run_visual_arbitration(
 
         try:
             batch, res = provider.infer(req, response_model=VisualSemanticBatch)
+            record_provider_usage(
+                paths,
+                {
+                    "request_id": res.request_id,
+                    "requested_request_id": req.request_id,
+                    "provider": provider.name,
+                    "model": provider.model,
+                    "pass": "visual_arbitration",
+                    "latency_ms": res.latency_ms,
+                    "attempt_count": res.attempt_count,
+                    "transport_attempt_count": res.transport_attempt_count,
+                    "schema_retry_count": res.schema_retry_count,
+                    "provider_request_ids": res.provider_request_ids,
+                    "usage": res.usage.model_dump(),
+                },
+            )
         except Exception as exc:
             logger.warning("Visual provider inference failed for %s: %s", audit.block_id, exc)
             updated_audit = audit.model_copy(

@@ -5,7 +5,15 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from book2epub.config import AppConfig, JobConfig, MetadataConfig, MinerUConfig, RenderConfig
+from book2epub.config import (
+    AppConfig,
+    JobConfig,
+    MetadataConfig,
+    MinerUConfig,
+    RenderConfig,
+    normalize_provider_alias,
+    normalize_vision_alias,
+)
 
 
 def test_default_configs_valid() -> None:
@@ -59,3 +67,10 @@ def test_metadata_config_authors_default() -> None:
     assert meta.authors == []
     meta2 = MetadataConfig(authors=["Author One", "Author Two"])
     assert len(meta2.authors) == 2
+
+
+def test_cli_aliases_normalize_to_canonical_values() -> None:
+    assert normalize_provider_alias("gemini") == "google"
+    assert normalize_provider_alias("google") == "google"
+    assert normalize_vision_alias("always") == "on"
+    assert normalize_vision_alias("on") == "on"

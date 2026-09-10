@@ -1,5 +1,6 @@
 """JSON Schema normalization for strict provider structured outputs (M7 spec Section 7)."""
 
+from copy import deepcopy
 from typing import Any
 
 from pydantic import BaseModel
@@ -38,10 +39,47 @@ def _enforce_strict_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-def build_provider_schema(model: type[BaseModel]) -> dict[str, Any]:
+def _strip_anthropic_unsupported_keywords(schema: dict[str, Any]) -> dict[str, Any]:
+    """Keep canonical constraints local while avoiding Anthropic schema 400s."""
+    unsupported = {
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+    }
+    for key in list(schema):
+        if key in unsupported:
+            del schema[key]
+    for value in schema.values():
+        if isinstance(value, dict):
+            _strip_anthropic_unsupported_keywords(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    _strip_anthropic_unsupported_keywords(item)
+    return schema
+
+
+def build_provider_schema(
+    model: type[BaseModel], provider: str | None = None
+) -> dict[str, Any]:
     """
     Generate and normalize a strict JSON Schema from a Pydantic model suitable
     for OpenAI, Gemini, Ollama, and Anthropic structured outputs.
     """
-    raw_schema = model.model_json_schema()
-    return _enforce_strict_object_schema(raw_schema)
+    raw_schema = _enforce_strict_object_schema(model.model_json_schema())
+    if provider == "anthropic":
+        return _strip_anthropic_unsupported_keywords(deepcopy(raw_schema))
+    return raw_schema
+
+
+def adapt_provider_schema(schema: dict[str, Any], provider: str) -> dict[str, Any]:
+    """Adapt an already-built canonical schema at the provider boundary."""
+    adapted = deepcopy(schema)
+    if provider == "anthropic":
+        return _strip_anthropic_unsupported_keywords(adapted)
+    return adapted

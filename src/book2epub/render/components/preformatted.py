@@ -16,7 +16,7 @@ SUBTYPE_TO_CLASS = {
     "repl_session": "repl-session",
     "log_output": "log-output",
     "config_file": "config-file",
-    "generic": "generic-preformatted",
+    "generic_preformatted": "generic-preformatted",
 }
 
 

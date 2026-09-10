@@ -15,6 +15,8 @@ from book2epub.config import (
     PresentationConfig,
     RenderConfig,
     SemanticConfig,
+    normalize_provider_alias,
+    normalize_vision_alias,
 )
 from book2epub.doctor import print_doctor_report, run_doctor_checks
 from book2epub.logging import configure_logging, console, error_console
@@ -171,7 +173,7 @@ def convert(
         str,
         typer.Option(
             "--semantic-provider",
-            help="Semantic provider backend (ollama, openai, google, anthropic).",
+            help="Semantic provider: ollama, openai, google, anthropic (gemini aliases google).",
         ),
     ] = "ollama",
     semantic_model: Annotated[
@@ -182,7 +184,7 @@ def convert(
         str,
         typer.Option(
             "--semantic-vision",
-            help="Visual review policy (off, auto, on).",
+            help="Visual review policy: off, auto, on (always aliases on).",
         ),
     ] = "auto",
     allow_cloud: Annotated[
@@ -254,10 +256,10 @@ def convert(
     )
     semantic_cfg = SemanticConfig(
         enabled=semantic,
-        provider=semantic_provider,  # type: ignore[arg-type]
+        provider=normalize_provider_alias(semantic_provider),
         model=semantic_model,
         allow_cloud=allow_cloud,
-        vision=semantic_vision,  # type: ignore[arg-type]
+        vision=normalize_vision_alias(semantic_vision),
     )
     ocr_cfg = OCRCorrectionConfig(
         mode=ocr_correction,  # type: ignore[arg-type]
@@ -303,7 +305,7 @@ def print_conversion_summary(result: PackagingResult) -> None:
     table.add_row("Figure Count", str(result.figure_count))
     table.add_row("Chart Count", str(result.chart_count))
     table.add_row("Table Count", str(result.table_count))
-    table.add_row("Code Blocks", str(result.code_count))
+    table.add_row("Code/Preformatted Blocks", str(result.code_count))
     table.add_row("Math Formulas", str(result.math_count))
     table.add_row("Fallbacks Used", str(result.fallback_count))
     table.add_row("Warnings Count", str(result.warning_count))
@@ -374,7 +376,7 @@ def from_middle(
         str,
         typer.Option(
             "--semantic-provider",
-            help="Semantic provider backend (ollama, openai, google, anthropic).",
+            help="Semantic provider: ollama, openai, google, anthropic (gemini aliases google).",
         ),
     ] = "ollama",
     semantic_model: Annotated[
@@ -385,7 +387,7 @@ def from_middle(
         str,
         typer.Option(
             "--semantic-vision",
-            help="Visual review policy (off, auto, on).",
+            help="Visual review policy: off, auto, on (always aliases on).",
         ),
     ] = "auto",
     allow_cloud: Annotated[
@@ -439,10 +441,10 @@ def from_middle(
     )
     semantic_cfg = SemanticConfig(
         enabled=semantic,
-        provider=semantic_provider,  # type: ignore[arg-type]
+        provider=normalize_provider_alias(semantic_provider),
         model=semantic_model,
         allow_cloud=allow_cloud,
-        vision=semantic_vision,  # type: ignore[arg-type]
+        vision=normalize_vision_alias(semantic_vision),
     )
     ocr_cfg = OCRCorrectionConfig(
         mode=ocr_correction,  # type: ignore[arg-type]

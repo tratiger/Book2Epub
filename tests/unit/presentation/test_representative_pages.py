@@ -96,3 +96,20 @@ def test_representative_pages_cap_and_fill() -> None:
     assert len(selected) == len(set(selected))
     assert selected == sorted(selected)
     assert all(0 <= p < 50 for p in selected)
+
+
+def test_generic_preformatted_subtype_is_selected_as_source_code() -> None:
+    pages = [SourcePage(page_idx=i, width=600, height=800) for i in range(4)]
+    bookir = BookIR(
+        source=SourceDocument(page_count=4, pages=pages),
+        blocks=[
+            PreformattedBlock(
+                id="generic-pre",
+                text="preserve this layout",
+                subtype="generic_preformatted",
+                sources=[SourceRef(page_idx=2, source_type="text")],
+            )
+        ],
+    )
+
+    assert 2 in select_representative_pages(bookir, max_pages=1)

@@ -6,6 +6,7 @@ from book2epub.ir.models import BookIR
 from book2epub.paths import JobPaths
 from book2epub.providers.base import StructuredProvider
 from book2epub.providers.models import ImageInput, StructuredInferenceRequest
+from book2epub.providers.usage import record_provider_usage
 from book2epub.semantic.schemas import build_provider_schema
 from book2epub.visual.raster import PageRasterCache
 from book2epub.visual.source import VisualSource
@@ -98,7 +99,23 @@ def infer_style_profile(
 
     # 4. Invoke provider
     try:
-        decision, _ = provider.infer(req, response_model=BookStyleProfileDecision)
+        decision, result = provider.infer(req, response_model=BookStyleProfileDecision)
+        record_provider_usage(
+            paths,
+            {
+                "request_id": result.request_id,
+                "requested_request_id": req.request_id,
+                "provider": provider.name,
+                "model": provider.model,
+                "pass": "presentation_infer",
+                "latency_ms": result.latency_ms,
+                "attempt_count": result.attempt_count,
+                "transport_attempt_count": result.transport_attempt_count,
+                "schema_retry_count": result.schema_retry_count,
+                "provider_request_ids": result.provider_request_ids,
+                "usage": result.usage.model_dump(),
+            },
+        )
     except Exception as exc:
         logger.warning(
             "Style inference provider call failed: %s. Falling back to enhanced profile.", exc

@@ -191,13 +191,17 @@ def run_structural_checks(
         effective_code = max(render_result.code_count, retyped_code)
         code_passed = effective_code >= source_code_count
         code_details = (
-            f"Rendered {render_result.code_count} code components + justified semantic "
+            f"Rendered {render_result.code_count} code/preformatted components + "
+            "justified semantic "
             f"retypes (effective: {effective_code}, source: {source_code_count})."
         )
         target_code_count = effective_code
     else:
         code_passed = render_result.code_count >= source_code_count
-        code_details = f"Rendered {render_result.code_count} code (source: {source_code_count})."
+        code_details = (
+            f"Rendered {render_result.code_count} code/preformatted components "
+            f"(source: {source_code_count})."
+        )
         target_code_count = render_result.code_count
 
     checks.append(

@@ -12,7 +12,7 @@ from book2epub.providers.models import (
     StructuredInferenceRequest,
     StructuredInferenceResult,
 )
-from book2epub.providers.retry import execute_with_retry
+from book2epub.providers.retry import execute_with_retry_detailed
 
 
 class OllamaProvider:
@@ -76,13 +76,21 @@ class OllamaProvider:
                 stream=False,
             )
 
-        resp = execute_with_retry(_call_ollama, provider_name=self.name)
-        latency_ms = int((time.perf_counter() - start_time) * 1000)
+        first_execution = execute_with_retry_detailed(_call_ollama, provider_name=self.name)
+        resp = first_execution.value
+        transport_attempt_count = first_execution.attempt_count
+        response_objects = [resp]
+        adopted_request_id = request.request_id
+        schema_retry_count = 0
 
         # Extract message content
-        raw_text = getattr(resp.message, "content", "") if hasattr(resp, "message") else ""
-        if isinstance(resp, dict):
-            raw_text = resp.get("message", {}).get("content", "")
+        def extract_content(response: Any) -> str:
+            if isinstance(response, dict):
+                return str(response.get("message", {}).get("content", ""))
+            message = getattr(response, "message", None)
+            return str(getattr(message, "content", "")) if message is not None else ""
+
+        raw_text = extract_content(resp)
 
         # Validate with Pydantic locally (Section 4 rule 3)
         try:
@@ -92,11 +100,18 @@ class OllamaProvider:
             # Allow 1 schema retry on local Pydantic validation failure
             retry_req_id = f"{request.request_id}-schema-retry"
             try:
-                resp_retry = execute_with_retry(_call_ollama, provider_name=self.name)
-                msg_obj = getattr(resp_retry, "message", None)
-                raw_text = getattr(msg_obj, "content", "") if msg_obj else ""
+                schema_retry_count = 1
+                retry_execution = execute_with_retry_detailed(
+                    _call_ollama, provider_name=self.name
+                )
+                resp_retry = retry_execution.value
+                response_objects.append(resp_retry)
+                transport_attempt_count += retry_execution.attempt_count
+                resp = resp_retry
+                raw_text = extract_content(resp_retry)
                 parsed_json = json.loads(raw_text)
                 validated_obj = response_model.model_validate(parsed_json)
+                adopted_request_id = retry_req_id
             except Exception as final_val_err:
                 raise ProviderError(
                     f"Ollama response failed local Pydantic schema validation: {final_val_err}",
@@ -105,19 +120,71 @@ class OllamaProvider:
 
         in_tok = getattr(resp, "prompt_eval_count", None)
         out_tok = getattr(resp, "eval_count", None)
+        provider_request_ids = [
+            response_id
+            for response in response_objects
+            if isinstance(
+                response_id := (
+                    response.get("id")
+                    if isinstance(response, dict)
+                    else getattr(response, "id", None)
+                ),
+                str,
+            )
+        ]
+        total_in = sum(
+            value
+            for response in response_objects
+            if isinstance(
+                value := (
+                    response.get("prompt_eval_count")
+                    if isinstance(response, dict)
+                    else getattr(response, "prompt_eval_count", None)
+                ),
+                int,
+            )
+        )
+        total_out = sum(
+            value
+            for response in response_objects
+            if isinstance(
+                value := (
+                    response.get("eval_count")
+                    if isinstance(response, dict)
+                    else getattr(response, "eval_count", None)
+                ),
+                int,
+            )
+        )
+        latency_ms = int((time.perf_counter() - start_time) * 1000)
+        final_response_id = (
+            resp.get("id") if isinstance(resp, dict) else getattr(resp, "id", None)
+        )
         usage = ProviderUsage(
             input_tokens=in_tok if isinstance(in_tok, int) else None,
             output_tokens=out_tok if isinstance(out_tok, int) else None,
+            raw_provider_request_id=(
+                final_response_id if isinstance(final_response_id, str) else None
+            ),
+            provider_request_ids=provider_request_ids,
+            total_input_tokens=total_in or None,
+            total_output_tokens=total_out or None,
+            attempt_count=transport_attempt_count,
+            schema_retry_count=schema_retry_count,
         )
 
         result = StructuredInferenceResult(
-            request_id=request.request_id,
+            request_id=adopted_request_id,
             provider=self.name,
             model=self.model,
             raw_text=raw_text,
             parsed_json=parsed_json,
             usage=usage,
             latency_ms=latency_ms,
+            attempt_count=transport_attempt_count,
+            transport_attempt_count=transport_attempt_count,
+            schema_retry_count=schema_retry_count,
+            provider_request_ids=provider_request_ids,
         )
 
         return validated_obj, result

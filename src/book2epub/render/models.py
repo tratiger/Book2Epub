@@ -72,6 +72,8 @@ class RenderResult:
     figure_count: int
     chart_count: int
     table_count: int
+    # Legacy aggregate: CodeBlock plus every PreformattedBlock subtype.
+    # Detailed semantic component counts live in ``component_counts``.
     code_count: int
     math_count: int
     fallback_count: int

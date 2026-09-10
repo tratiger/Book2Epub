@@ -68,7 +68,8 @@ def select_representative_pages(
     # 3. Page containing source code
     for b in blocks:
         if isinstance(b, CodeBlock) or (
-            isinstance(b, PreformattedBlock) and b.subtype in ("source_code", "generic")
+            isinstance(b, PreformattedBlock)
+            and b.subtype in ("source_code", "generic_preformatted")
         ):
             if add_page(_get_block_page(b)):
                 break

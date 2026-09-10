@@ -1,9 +1,21 @@
 """Configuration models for Book2Epub."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, Field, field_validator
+
+
+def normalize_provider_alias(value: str) -> Literal["ollama", "openai", "google", "anthropic"]:
+    """Normalize CLI provider aliases to the canonical provider enum."""
+    normalized = {"gemini": "google"}.get(value.lower(), value.lower())
+    return cast(Literal["ollama", "openai", "google", "anthropic"], normalized)
+
+
+def normalize_vision_alias(value: str) -> Literal["off", "auto", "on"]:
+    """Normalize the historical CLI alias ``always`` to canonical ``on``."""
+    normalized = {"always": "on"}.get(value.lower(), value.lower())
+    return cast(Literal["off", "auto", "on"], normalized)
 
 
 class AppConfig(BaseModel):
