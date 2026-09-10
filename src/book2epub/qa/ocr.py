@@ -139,6 +139,14 @@ def evaluate_ocr_qa(
                         f"for block '{a.block_id}'"
                     )
 
+                # Code/preformatted correction is allowed only in mode="all"
+                if a.content_role in ("code_body", "preformatted_body") and cfg_mode != "all":
+                    violations.append(
+                        f"Code/preformatted OCR proposal for segment '{a.segment_id}' "
+                        f"was applied under mode='{cfg_mode}', but code correction is "
+                        f"only allowed in 'all' mode"
+                    )
+
                 # Sensitive / code confirmation check
                 is_code = a.content_role in ("code_body", "preformatted_body")
                 is_sensitive = is_sensitive_change(
@@ -168,7 +176,14 @@ def evaluate_ocr_qa(
                             f"was applied with mismatched confirmation text: "
                             f"'{a.confirmation_observed_text}' != '{a.new_text}'"
                         )
-                elif a.confirmation_result is not None and a.confirmation_result is False:
+                else:
+                    if a.first_confidence < 0.98:
+                        violations.append(
+                            f"OCR proposal for segment '{a.segment_id}' "
+                            f"was applied with confidence={a.first_confidence} < 0.98"
+                        )
+
+                if a.confirmation_result is not None and a.confirmation_result is False:
                     violations.append(
                         f"OCR proposal for segment '{a.segment_id}' "
                         f"was applied despite confirmation disagreement"

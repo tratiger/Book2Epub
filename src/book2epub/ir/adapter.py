@@ -130,7 +130,11 @@ class MiddleJsonAdapter:
         )
 
     def extract_inlines(
-        self, block: dict[str, Any], page_idx: int, block_id: str = ""
+        self,
+        block: dict[str, Any],
+        page_idx: int,
+        block_id: str = "",
+        segment_scope: str = "",
     ) -> list[Inline]:
         """Extract inline nodes (Text, InlineMath) from a block's lines and spans."""
         inlines: list[Inline] = []
@@ -188,6 +192,8 @@ class MiddleJsonAdapter:
                             boundary_before = "same_line"
 
                         prefix = block_id if block_id else "blk"
+                        if segment_scope:
+                            prefix = f"{prefix}-{segment_scope}"
                         seg_id = f"{prefix}-p{page_idx:03d}-l{line_idx:03d}-s{span_idx:03d}"
                         seg_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                         seg = SourceTextSegment(
@@ -274,12 +280,30 @@ class MiddleJsonAdapter:
                     footnote_inlines: list[Inline] = []
                     chart_content: str | None = None
 
+                    cap_idx = 0
+                    fn_idx = 0
                     for sub in block.get("blocks", []):
                         st = sub.get("type", "")
                         if "caption" in st:
-                            caption_inlines.extend(self.extract_inlines(sub, page_idx))
+                            caption_inlines.extend(
+                                self.extract_inlines(
+                                    sub,
+                                    page_idx,
+                                    block_id=b_id,
+                                    segment_scope=f"caption-{cap_idx}",
+                                )
+                            )
+                            cap_idx += 1
                         elif "footnote" in st:
-                            footnote_inlines.extend(self.extract_inlines(sub, page_idx))
+                            footnote_inlines.extend(
+                                self.extract_inlines(
+                                    sub,
+                                    page_idx,
+                                    block_id=b_id,
+                                    segment_scope=f"footnote-{fn_idx}",
+                                )
+                            )
+                            fn_idx += 1
                         elif "body" in st or st in ("image", "chart"):
                             for line in sub.get("lines", []):
                                 for sp in line.get("spans", []):
@@ -346,12 +370,30 @@ class MiddleJsonAdapter:
                     caption_inlines = []
                     footnote_inlines = []
 
+                    cap_idx = 0
+                    fn_idx = 0
                     for sub in block.get("blocks", []):
                         st = sub.get("type", "")
                         if "caption" in st:
-                            caption_inlines.extend(self.extract_inlines(sub, page_idx))
+                            caption_inlines.extend(
+                                self.extract_inlines(
+                                    sub,
+                                    page_idx,
+                                    block_id=b_id,
+                                    segment_scope=f"caption-{cap_idx}",
+                                )
+                            )
+                            cap_idx += 1
                         elif "footnote" in st:
-                            footnote_inlines.extend(self.extract_inlines(sub, page_idx))
+                            footnote_inlines.extend(
+                                self.extract_inlines(
+                                    sub,
+                                    page_idx,
+                                    block_id=b_id,
+                                    segment_scope=f"footnote-{fn_idx}",
+                                )
+                            )
+                            fn_idx += 1
                         elif "body" in st or st == "table":
                             for line in sub.get("lines", []):
                                 for sp in line.get("spans", []):
@@ -417,12 +459,30 @@ class MiddleJsonAdapter:
                     caption_inlines = []
                     footnote_inlines = []
 
+                    cap_idx = 0
+                    fn_idx = 0
                     for sub in block.get("blocks", []):
                         st = sub.get("type", "")
                         if "caption" in st:
-                            caption_inlines.extend(self.extract_inlines(sub, page_idx))
+                            caption_inlines.extend(
+                                self.extract_inlines(
+                                    sub,
+                                    page_idx,
+                                    block_id=b_id,
+                                    segment_scope=f"caption-{cap_idx}",
+                                )
+                            )
+                            cap_idx += 1
                         elif "footnote" in st:
-                            footnote_inlines.extend(self.extract_inlines(sub, page_idx))
+                            footnote_inlines.extend(
+                                self.extract_inlines(
+                                    sub,
+                                    page_idx,
+                                    block_id=b_id,
+                                    segment_scope=f"footnote-{fn_idx}",
+                                )
+                            )
+                            fn_idx += 1
                         elif "body" in st or st == "code":
                             code_text = self.extract_code_text(sub)
 
@@ -475,13 +535,23 @@ class MiddleJsonAdapter:
                 elif b_type == "list":
                     # Collect item inlines
                     items: list[list[Inline]] = []
-                    for sub in block.get("blocks", []):
-                        item_inlines = self.extract_inlines(sub, page_idx)
+                    for it_idx, sub in enumerate(block.get("blocks", [])):
+                        item_inlines = self.extract_inlines(
+                            sub,
+                            page_idx,
+                            block_id=b_id,
+                            segment_scope=f"item-{it_idx}",
+                        )
                         if item_inlines:
                             items.append(item_inlines)
                     if not items:
-                        for line in block.get("lines", []):
-                            l_inlines = self.extract_inlines({"lines": [line]}, page_idx)
+                        for it_idx, line in enumerate(block.get("lines", [])):
+                            l_inlines = self.extract_inlines(
+                                {"lines": [line]},
+                                page_idx,
+                                block_id=b_id,
+                                segment_scope=f"item-{it_idx}",
+                            )
                             if l_inlines:
                                 items.append(l_inlines)
 
@@ -504,25 +574,30 @@ class MiddleJsonAdapter:
 
                 elif b_type == "index":
                     items = []
-                    for line in block.get("lines", []):
-                        l_inlines = self.extract_inlines({"lines": [line]}, page_idx)
+                    for it_idx, line in enumerate(block.get("lines", [])):
+                        l_inlines = self.extract_inlines(
+                            {"lines": [line]},
+                            page_idx,
+                            block_id=b_id,
+                            segment_scope=f"item-{it_idx}",
+                        )
                         if l_inlines:
                             items.append(l_inlines)
                     page_blocks.append(IndexBlock(id=b_id, items=items, sources=[s_ref]))
 
                 elif b_type == "aside_text":
-                    inlines = self.extract_inlines(block, page_idx)
+                    inlines = self.extract_inlines(block, page_idx, block_id=b_id)
                     page_blocks.append(Aside(id=b_id, inlines=inlines, sources=[s_ref]))
 
                 elif b_type == "page_footnote":
-                    inlines = self.extract_inlines(block, page_idx)
+                    inlines = self.extract_inlines(block, page_idx, block_id=b_id)
                     page_blocks.append(
                         Footnote(id=b_id, inlines=inlines, scope="page", sources=[s_ref])
                     )
 
                 else:
                     # Unknown block type
-                    inlines = self.extract_inlines(block, page_idx)
+                    inlines = self.extract_inlines(block, page_idx, block_id=b_id)
                     text_extracted = " ".join(i.text for i in inlines if isinstance(i, Text))
                     self.warnings.append(
                         IRWarning(
@@ -549,7 +624,7 @@ class MiddleJsonAdapter:
                 if d_type == "aside_text":
                     d_id = self.next_block_id()
                     d_ref = self.extract_source_ref(d_block, page_idx, source_index=d_idx)
-                    inlines = self.extract_inlines(d_block, page_idx)
+                    inlines = self.extract_inlines(d_block, page_idx, block_id=d_id)
                     aside_node = Aside(id=d_id, inlines=inlines, sources=[d_ref])
                     aside_box = parse_bbox(d_block.get("bbox"))
                     if aside_box is not None:
@@ -566,7 +641,7 @@ class MiddleJsonAdapter:
                 elif d_type == "page_footnote":
                     d_id = self.next_block_id()
                     d_ref = self.extract_source_ref(d_block, page_idx, source_index=d_idx)
-                    inlines = self.extract_inlines(d_block, page_idx)
+                    inlines = self.extract_inlines(d_block, page_idx, block_id=d_id)
                     page_blocks.append(
                         Footnote(id=d_id, inlines=inlines, scope="page", sources=[d_ref])
                     )

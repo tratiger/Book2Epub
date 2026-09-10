@@ -3,7 +3,17 @@
 import re
 from typing import Any
 
-from book2epub.ir.models import BBox, BookIR, SourceRef, SourceTextSegment, Table
+from book2epub.ir.models import (
+    BBox,
+    BookIR,
+    Footnote,
+    ListBlock,
+    SourceRef,
+    SourceTextSegment,
+    Table,
+    extract_inline_source_segments,
+    extract_inline_visible_text,
+)
 from book2epub.semantic.hashing import compute_content_sha256, compute_text_sha256
 from book2epub.semantic.models import (
     EvidenceLine,
@@ -392,30 +402,31 @@ def build_semantic_evidence(
         if hasattr(ir_block, "fallback_asset_id") and getattr(ir_block, "fallback_asset_id"):
             asset_ids.append(getattr(ir_block, "fallback_asset_id"))
 
-        # Caption text
+        # Caption text & segments
         caption_text = None
+        caption_source_segments: list[SourceTextSegment] = []
         if hasattr(ir_block, "caption") and getattr(ir_block, "caption"):
-            cap_parts: list[str] = []
-            for inl in getattr(ir_block, "caption"):
-                if hasattr(inl, "text"):
-                    cap_parts.append(getattr(inl, "text"))
-            caption_text = "".join(cap_parts) or None
+            caption_text = extract_inline_visible_text(getattr(ir_block, "caption")) or None
+            caption_source_segments = extract_inline_source_segments(getattr(ir_block, "caption"))
 
-        # Footnote text
+        # Footnote text & segments
         footnote_text = None
+        footnote_source_segments: list[SourceTextSegment] = []
         if hasattr(ir_block, "footnotes") and getattr(ir_block, "footnotes"):
-            fn_parts: list[str] = []
-            for inl in getattr(ir_block, "footnotes"):
-                if hasattr(inl, "text"):
-                    fn_parts.append(getattr(inl, "text"))
-            footnote_text = "".join(fn_parts) or None
+            footnote_text = extract_inline_visible_text(getattr(ir_block, "footnotes")) or None
+            fns = getattr(ir_block, "footnotes")
+            footnote_source_segments = extract_inline_source_segments(fns)
+        elif isinstance(ir_block, Footnote) and getattr(ir_block, "inlines", None):
+            footnote_text = extract_inline_visible_text(getattr(ir_block, "inlines")) or None
+            footnote_source_segments = extract_inline_source_segments(getattr(ir_block, "inlines"))
 
-        # Source segments from Text inlines
+        # Source segments from Text inlines & ListBlock items
         source_segments: list[SourceTextSegment] = []
         if hasattr(ir_block, "inlines"):
-            for inl in getattr(ir_block, "inlines", []):
-                if hasattr(inl, "source_segments"):
-                    source_segments.extend(getattr(inl, "source_segments"))
+            source_segments.extend(extract_inline_source_segments(getattr(ir_block, "inlines", [])))
+        elif isinstance(ir_block, ListBlock):
+            for it in ir_block.items:
+                source_segments.extend(extract_inline_source_segments(it))
 
         # Content hash
         content_hash = compute_content_sha256(
@@ -478,6 +489,8 @@ def build_semantic_evidence(
             footnote_plain_text=footnote_text,
             line_segments=line_segments,
             source_segments=source_segments,
+            caption_source_segments=caption_source_segments,
+            footnote_source_segments=footnote_source_segments,
             content_sha256=content_hash,
             allowed_targets=allowed_targets,
             flags=flags,

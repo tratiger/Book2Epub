@@ -380,3 +380,36 @@ class BookIR(BaseModel):
     semantic_metadata: Any | None = None
     presentation_profile: Any | None = None
 
+
+def extract_inline_visible_text(inlines: list[Inline] | None) -> str:
+    """
+    Extract visible plain text recursively from inlines (Text, InlineMath, Hyperlink, LineBreak).
+    Unified authoritative extractor across Evidence, QA, and Semantic stages.
+    """
+    if not inlines:
+        return ""
+    parts: list[str] = []
+    for inl in inlines:
+        if isinstance(inl, Text):
+            parts.append(inl.text)
+        elif isinstance(inl, InlineMath):
+            parts.append(inl.latex)
+        elif isinstance(inl, Hyperlink):
+            parts.append(extract_inline_visible_text(inl.children))
+        elif isinstance(inl, LineBreak):
+            parts.append("\n")
+    return "".join(parts)
+
+
+def extract_inline_source_segments(inlines: list[Inline] | None) -> list[SourceTextSegment]:
+    """Extract all SourceTextSegments recursively from inlines (Text, Hyperlink)."""
+    if not inlines:
+        return []
+    segments: list[SourceTextSegment] = []
+    for inl in inlines:
+        if isinstance(inl, Text):
+            segments.extend(inl.source_segments)
+        elif isinstance(inl, Hyperlink):
+            segments.extend(extract_inline_source_segments(inl.children))
+    return segments
+

@@ -22,16 +22,13 @@ from book2epub.ir.models import (
     Figure,
     Footnote,
     Heading,
-    Hyperlink,
-    Inline,
-    InlineMath,
-    LineBreak,
     ListBlock,
     Paragraph,
     PreformattedBlock,
     Table,
     Text,
     UnknownBlock,
+    extract_inline_visible_text,
 )
 from book2epub.qa.models import (
     DispositionStr,
@@ -101,19 +98,8 @@ def is_acceptable_text_preservation(expected_text: str, final_text: str) -> bool
     return _is_cjk_boundary_spacing_difference(expected_text.strip(), final_text.strip())
 
 
-def extract_inlines_text(inlines: list[Inline]) -> str:
-    """Extract plain text recursively from inlines, ignoring page boundaries."""
-    parts: list[str] = []
-    for inl in inlines:
-        if isinstance(inl, Text):
-            parts.append(inl.text)
-        elif isinstance(inl, InlineMath):
-            parts.append(inl.latex)
-        elif isinstance(inl, Hyperlink):
-            parts.append(extract_inlines_text(inl.children))
-        elif isinstance(inl, LineBreak):
-            parts.append("\n")
-    return "".join(parts)
+# Authoritative inline visible text extractor
+extract_inlines_text = extract_inline_visible_text
 
 
 def compute_final_block_hashes(block: Block) -> tuple[str, str]:
@@ -642,22 +628,21 @@ def evaluate_preservation_qa(
         ev = evidence_lookup.get(entry.source_block_id)
         if ev and (ev.footnote_text or ev.footnote_plain_text):
             expected_fn = ev.footnote_plain_text or ev.footnote_text or ""
-            if ev.source_segments:
-                fn_segs = [
-                    s
-                    for s in ev.source_segments
-                    if s.source_span_type == "footnote" or "fn" in s.segment_id.lower()
+            fn_segs = ev.footnote_source_segments or [
+                s
+                for s in (ev.source_segments or [])
+                if s.source_span_type == "footnote" or "fn" in s.segment_id.lower()
+            ]
+            if fn_segs:
+                eff_fn_segs = [
+                    s.model_copy(update={"text": applied_ocr[(ev.block_id, s.segment_id)]})
+                    if (ev.block_id, s.segment_id) in applied_ocr
+                    else s
+                    for s in fn_segs
                 ]
-                if fn_segs:
-                    eff_fn_segs = [
-                        s.model_copy(update={"text": applied_ocr[(ev.block_id, s.segment_id)]})
-                        if (ev.block_id, s.segment_id) in applied_ocr
-                        else s
-                        for s in fn_segs
-                    ]
-                    expected_fn = reconstruct_text_from_source_segments(
-                        eff_fn_segs, block_id=ev.block_id
-                    )
+                expected_fn = reconstruct_text_from_source_segments(
+                    eff_fn_segs, block_id=ev.block_id
+                )
 
             final_fn_block: Footnote | None = None
             final_fn_container: Block | None = None
@@ -725,22 +710,21 @@ def evaluate_preservation_qa(
         # 5. Caption loss & corruption (per-block)
         if ev and (ev.caption_text or ev.caption_plain_text):
             expected_cap = ev.caption_plain_text or ev.caption_text or ""
-            if ev.source_segments:
-                cap_segs = [
-                    s
-                    for s in ev.source_segments
-                    if s.source_span_type == "caption" or "caption" in s.segment_id.lower()
+            cap_segs = ev.caption_source_segments or [
+                s
+                for s in (ev.source_segments or [])
+                if s.source_span_type == "caption" or "caption" in s.segment_id.lower()
+            ]
+            if cap_segs:
+                eff_cap_segs = [
+                    s.model_copy(update={"text": applied_ocr[(ev.block_id, s.segment_id)]})
+                    if (ev.block_id, s.segment_id) in applied_ocr
+                    else s
+                    for s in cap_segs
                 ]
-                if cap_segs:
-                    eff_cap_segs = [
-                        s.model_copy(update={"text": applied_ocr[(ev.block_id, s.segment_id)]})
-                        if (ev.block_id, s.segment_id) in applied_ocr
-                        else s
-                        for s in cap_segs
-                    ]
-                    expected_cap = reconstruct_text_from_source_segments(
-                        eff_cap_segs, block_id=ev.block_id
-                    )
+                expected_cap = reconstruct_text_from_source_segments(
+                    eff_cap_segs, block_id=ev.block_id
+                )
 
             final_cap_block: Block | None = None
             for bid in entry.final_block_ids:

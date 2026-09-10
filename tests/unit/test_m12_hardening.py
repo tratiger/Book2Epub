@@ -1226,3 +1226,364 @@ def test_ad_ocr_artifact_mode_mismatch_fails_ocr_qa(tmp_path: Path) -> None:
     assert any("OCR correction audit mode mismatch" in v for v in violations)
 
 
+def test_ae_figure_caption_footnote_segment_ids_unique(tmp_path: Path) -> None:
+    """Test AE: Figure caption and footnote have distinct segment IDs and match owning block ID."""
+    from book2epub.ir.adapter import MiddleJsonAdapter
+    from book2epub.semantic.evidence import build_semantic_evidence
+
+    img_file = tmp_path / "fig1.png"
+    img_file.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    raw_data = {
+        "_version_name": "3.4.5",
+        "_backend": "hybrid",
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [
+                    {
+                        "type": "image",
+                        "blocks": [
+                            {
+                                "type": "image_caption",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "Figure 1: Architecture",
+                                                "bbox": [10, 10, 100, 20],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "image_footnote",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "Note 1: Source details",
+                                                "bbox": [10, 30, 100, 40],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "image_body",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "image",
+                                                "image_path": "fig1.png",
+                                                "bbox": [10, 50, 200, 200],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    adapter = MiddleJsonAdapter(base_dir=tmp_path, strict=False)
+    ir = adapter.convert_middle_json(raw_data)
+
+    fig = next(b for b in ir.blocks if isinstance(b, Figure))
+    assert fig is not None
+
+    cap_segs = [s for inl in fig.caption if isinstance(inl, Text) for s in inl.source_segments]
+    fn_segs = [s for inl in fig.footnotes if isinstance(inl, Text) for s in inl.source_segments]
+
+    assert len(cap_segs) == 1
+    assert len(fn_segs) == 1
+
+    assert cap_segs[0].block_id == fig.id
+    assert fn_segs[0].block_id == fig.id
+    assert cap_segs[0].segment_id != fn_segs[0].segment_id
+    assert "caption-0" in cap_segs[0].segment_id
+    assert "footnote-0" in fn_segs[0].segment_id
+
+    # Verify evidence extraction preserves caption and footnote source segments separately
+    evidence = build_semantic_evidence(raw_data, ir)
+    ev_blk = evidence.blocks[0]
+    assert ev_blk.block_id == fig.id
+    assert len(ev_blk.caption_source_segments) == 1
+    assert ev_blk.caption_source_segments[0].segment_id == cap_segs[0].segment_id
+    assert len(ev_blk.footnote_source_segments) == 1
+    assert ev_blk.footnote_source_segments[0].segment_id == fn_segs[0].segment_id
+
+
+def test_af_list_item_segment_ids_unique(tmp_path: Path) -> None:
+    """Test AF: List item 1 and item 2 have unique segment IDs and match owning block ID."""
+    from book2epub.ir.adapter import MiddleJsonAdapter
+    from book2epub.ir.models import ListBlock
+
+    raw_data = {
+        "_version_name": "3.4.5",
+        "_backend": "hybrid",
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [
+                    {
+                        "type": "list",
+                        "blocks": [
+                            {
+                                "type": "list_item",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "First item content",
+                                                "bbox": [10, 10, 100, 20],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "list_item",
+                                "lines": [
+                                    {
+                                        "spans": [
+                                            {
+                                                "type": "text",
+                                                "content": "Second item content",
+                                                "bbox": [10, 30, 100, 40],
+                                            }
+                                        ]
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    adapter = MiddleJsonAdapter(base_dir=tmp_path, strict=False)
+    ir = adapter.convert_middle_json(raw_data)
+
+    list_blk = next(b for b in ir.blocks if isinstance(b, ListBlock))
+    assert list_blk is not None
+    assert len(list_blk.items) == 2
+
+    item0_segs = [
+        s for inl in list_blk.items[0] if isinstance(inl, Text) for s in inl.source_segments
+    ]
+    item1_segs = [
+        s for inl in list_blk.items[1] if isinstance(inl, Text) for s in inl.source_segments
+    ]
+
+    assert len(item0_segs) == 1
+    assert len(item1_segs) == 1
+
+    assert item0_segs[0].block_id == list_blk.id
+    assert item1_segs[0].block_id == list_blk.id
+    assert item0_segs[0].segment_id != item1_segs[0].segment_id
+    assert "item-0" in item0_segs[0].segment_id
+    assert "item-1" in item1_segs[0].segment_id
+
+
+def test_ag_caption_ocr_correction_does_not_propagate_to_footnote() -> None:
+    """Test AG: Applying OCR correction to caption leaves footnote byte-for-byte unchanged."""
+    from book2epub.ir.models import BBox
+    from book2epub.visual.ocr_apply import apply_segment_replacements
+
+    cap_seg = SourceTextSegment(
+        segment_id="fig-1-caption-0-p000-l000-s000",
+        block_id="fig-1",
+        page_idx=0,
+        line_index=0,
+        span_index=0,
+        text="Figure 1: D1agram",
+        bbox=BBox(x0=10.0, y0=10.0, x1=100.0, y1=20.0),
+        boundary_before="start",
+        source_span_type="caption",
+        text_sha256=compute_text_sha256("Figure 1: D1agram"),
+    )
+    fn_orig_text = "Note 1: Source data unchanged."
+    fn_seg = SourceTextSegment(
+        segment_id="fig-1-footnote-0-p000-l000-s000",
+        block_id="fig-1",
+        page_idx=0,
+        line_index=0,
+        span_index=0,
+        text=fn_orig_text,
+        bbox=BBox(x0=10.0, y0=30.0, x1=100.0, y1=40.0),
+        boundary_before="start",
+        source_span_type="footnote",
+        text_sha256=compute_text_sha256(fn_orig_text),
+    )
+    fig = Figure(
+        id="fig-1",
+        asset_id="asset-1",
+        caption=[Text(text="Figure 1: D1agram", source_segments=[cap_seg])],
+        footnotes=[Text(text=fn_orig_text, source_segments=[fn_seg])],
+    )
+
+    replacements = {("fig-1", cap_seg.segment_id): "Figure 1: Diagram"}
+    new_blocks = apply_segment_replacements([fig], replacements, mode="safe")
+
+    new_fig = new_blocks[0]
+    assert isinstance(new_fig, Figure)
+    assert new_fig.caption[0].text == "Figure 1: Diagram"
+    assert new_fig.caption[0].source_segments[0].text == "Figure 1: Diagram"
+
+    # Footnote MUST be byte-for-byte unchanged
+    assert new_fig.footnotes[0].text == fn_orig_text
+    assert new_fig.footnotes[0].source_segments[0].text == fn_orig_text
+    assert new_fig.footnotes[0].source_segments[0].text_sha256 == compute_text_sha256(fn_orig_text)
+
+
+def test_ah_legitimate_caption_footnote_ocr_passes_preservation() -> None:
+    """Test AH: Legitimate caption/footnote OCR corrections pass Preservation QA."""
+    from book2epub.ir.models import BBox
+
+    cap_seg = SourceTextSegment(
+        segment_id="fig-1-caption-0-p000-l000-s000",
+        block_id="fig-1",
+        page_idx=0,
+        line_index=0,
+        span_index=0,
+        text="Figure 1: D1agram",
+        bbox=BBox(x0=10.0, y0=10.0, x1=100.0, y1=20.0),
+        boundary_before="start",
+        source_span_type="caption",
+        text_sha256=compute_text_sha256("Figure 1: D1agram"),
+    )
+    fn_seg = SourceTextSegment(
+        segment_id="fig-1-footnote-0-p000-l000-s000",
+        block_id="fig-1",
+        page_idx=0,
+        line_index=0,
+        span_index=0,
+        text="Note 1: S0urce",
+        bbox=BBox(x0=10.0, y0=30.0, x1=100.0, y1=40.0),
+        boundary_before="start",
+        source_span_type="footnote",
+        text_sha256=compute_text_sha256("Note 1: S0urce"),
+    )
+
+    ev_block = SemanticEvidenceBlock(
+        block_id="fig-1",
+        page_idx=0,
+        kind="figure",
+        asset_ids=["asset-1"],
+        caption_text="Figure 1: D1agram",
+        caption_plain_text="Figure 1: D1agram",
+        caption_source_segments=[cap_seg],
+        footnote_text="Note 1: S0urce",
+        footnote_plain_text="Note 1: S0urce",
+        footnote_source_segments=[fn_seg],
+    )
+    evidence = SemanticEvidenceBook(
+        schema_version="1.1",
+        source_middle_sha256="",
+        raw_bookir_sha256="",
+        blocks=[ev_block],
+    )
+
+    corrected_cap_seg = cap_seg.model_copy(
+        update={
+            "text": "Figure 1: Diagram",
+            "text_sha256": compute_text_sha256("Figure 1: Diagram"),
+        }
+    )
+    corrected_fn_seg = fn_seg.model_copy(
+        update={"text": "Note 1: Source", "text_sha256": compute_text_sha256("Note 1: Source")}
+    )
+    final_fig = Figure(
+        id="fig-1",
+        asset_id="asset-1",
+        caption=[Text(text="Figure 1: Diagram", source_segments=[corrected_cap_seg])],
+        footnotes=[Text(text="Note 1: Source", source_segments=[corrected_fn_seg])],
+    )
+    final_ir = _create_dummy_ir([final_fig])
+
+    from book2epub.visual.models import OCRAuditRecord
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+
+    ocr_audits = [
+        OCRAuditRecord(
+            block_id="fig-1",
+            segment_id=cap_seg.segment_id,
+            page_idx=0,
+            bbox=[10.0, 10.0, 100.0, 20.0],
+            old_text="Figure 1: D1agram",
+            old_sha256=compute_text_sha256("Figure 1: D1agram"),
+            new_text="Figure 1: Diagram",
+            new_sha256=compute_text_sha256("Figure 1: Diagram"),
+            provider="mock",
+            model="mock",
+            first_confidence=0.99,
+            visible_error_type="character_substitution",
+            content_role="caption",
+            mode="safe",
+            status="applied",
+        ),
+        OCRAuditRecord(
+            block_id="fig-1",
+            segment_id=fn_seg.segment_id,
+            page_idx=0,
+            bbox=[10.0, 30.0, 100.0, 40.0],
+            old_text="Note 1: S0urce",
+            old_sha256=compute_text_sha256("Note 1: S0urce"),
+            new_text="Note 1: Source",
+            new_sha256=compute_text_sha256("Note 1: Source"),
+            provider="mock",
+            model="mock",
+            first_confidence=0.99,
+            visible_error_type="character_substitution",
+            content_role="footnote",
+            mode="safe",
+            status="applied",
+        ),
+    ]
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir, ocr_audits=ocr_audits)
+    assert len(violations) == 0, f"Unexpected violations: {violations}"
+
+
+def test_ai_caption_with_inlinemath_hyperlink_passes_preservation() -> None:
+    """Test AI: Caption with InlineMath and Hyperlink passes Preservation QA without corruption."""
+    from book2epub.ir.models import Hyperlink, InlineMath
+    from book2epub.semantic.evidence import build_semantic_evidence
+
+    cap_inlines = [
+        Text(text="Graph of "),
+        InlineMath(latex=r"y = f(x)"),
+        Text(text=" see "),
+        Hyperlink(url="https://example.com", children=[Text(text="documentation")]),
+    ]
+    fig = Figure(
+        id="fig-1",
+        asset_id="asset-1",
+        caption=cap_inlines,
+        footnotes=[],
+    )
+    bookir = _create_dummy_ir([fig])
+
+    evidence = build_semantic_evidence({}, bookir)
+    assert len(evidence.blocks) == 1
+    ev_blk = evidence.blocks[0]
+    assert ev_blk.caption_plain_text == r"Graph of y = f(x) see documentation"
+
+    ledger = build_preservation_ledger(evidence, bookir)
+    violations = evaluate_preservation_qa(ledger, evidence, bookir)
+    assert len(violations) == 0, f"Unexpected violations: {violations}"
+
+
+

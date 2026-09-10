@@ -80,7 +80,7 @@ def test_semantic_enabled_creates_evidence_and_draft(
     ev_data = json.loads(paths.semantic_evidence_json.read_text(encoding="utf-8"))
     ev_book = SemanticEvidenceBook.model_validate(ev_data)
     assert len(ev_book.blocks) == len(raw_ir.blocks)
-    assert ev_book.schema_version == "1.0"
+    assert ev_book.schema_version == "1.1"
 
     draft_data = json.loads(paths.semantic_draft_json.read_text(encoding="utf-8"))
     draft_book = SemanticDraftBook.model_validate(draft_data)
