@@ -124,7 +124,7 @@ class SemanticConfig(BaseModel):
         default=24_000, ge=1_000, description="Maximum characters per semantic chunk"
     )
     max_chunk_blocks: int = Field(
-        default=60, ge=5, description="Maximum blocks per semantic chunk"
+        default=60, ge=1, description="Maximum blocks per semantic chunk"
     )
     overlap_blocks: int = Field(
         default=8, ge=0, description="Context overlap blocks between chunks"

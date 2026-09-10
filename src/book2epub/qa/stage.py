@@ -19,6 +19,8 @@ class StageState(StrEnum):
     RUNNING = "running"
     COMPLETE = "complete"
     FAILED = "failed"
+    SKIPPED = "skipped"
+    CACHE_HIT = "cache_hit"
 
 
 class StageRecord(BaseModel):
@@ -31,6 +33,11 @@ class StageRecord(BaseModel):
     )
     schema_version: int = STAGE_SCHEMA_VERSION
     input_hash: str | None = None
+    cache_key: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    output_artifact: str | None = None
+    reason: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -40,6 +47,11 @@ def record_stage_status(
     state: StageState | str,
     input_hash: str | None = None,
     details: dict[str, Any] | None = None,
+    cache_key: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    output_artifact: str | None = None,
+    reason: str | None = None,
 ) -> StageRecord:
     """Record or update stage.json status for a pipeline stage."""
     state_enum = StageState(state) if isinstance(state, str) else state
@@ -47,6 +59,11 @@ def record_stage_status(
         stage=stage_name,
         state=state_enum,
         input_hash=input_hash,
+        cache_key=cache_key,
+        provider=provider,
+        model=model,
+        output_artifact=output_artifact,
+        reason=reason,
         details=details or {},
     )
     stage_file.parent.mkdir(parents=True, exist_ok=True)

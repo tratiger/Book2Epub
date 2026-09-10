@@ -1,5 +1,6 @@
 """Data models for Book2Epub Intermediate Representation (BookIR)."""
 
+import hashlib
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -94,6 +95,19 @@ class SourceTextSegment(BaseModel):
     ] = "unknown"
     source_span_type: str | None = None
     text_sha256: str
+
+
+def replace_source_segment_text(
+    segment: SourceTextSegment,
+    new_text: str,
+) -> SourceTextSegment:
+    """Return a segment with text and its M11 provenance hash updated together."""
+    return segment.model_copy(
+        update={
+            "text": new_text,
+            "text_sha256": hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
+        }
+    )
 
 
 class InlineBase(BaseModel):

@@ -1,8 +1,9 @@
 """Pass A structural models and deterministic outline tree construction (Appendix H6 & J6-J8)."""
 
+from collections.abc import Sequence
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from book2epub.ir.models import Block, Heading
 
@@ -65,6 +66,7 @@ class BookOutline(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     root_node_ids: list[str] = Field(default_factory=list)
     nodes: dict[str, OutlineNode] = Field(default_factory=dict)
+    _block_order: list[str] = PrivateAttr(default_factory=list)
 
 
 class OutlineContextItem(BaseModel):
@@ -141,34 +143,174 @@ def build_book_outline(blocks: list[Block]) -> BookOutline:
         nodes[node_id] = node
         stack.append((node_id, level))
 
-    return BookOutline(
+    result = BookOutline(
         schema_version="1.0",
         root_node_ids=root_ids,
         nodes=nodes,
     )
+    result._block_order = [block.id for block in blocks]
+    return result
 
 
 def get_outline_prompt_view(
     outline: BookOutline,
     current_block_id: str | None = None,
     max_items: int = 12,
+    ordered_block_ids: Sequence[str] | None = None,
 ) -> list[OutlineContextItem]:
     """
-    Derive a compact preceding outline list (up to max_items) for prompt context
-    as defined in Appendix J8.
-    """
-    items: list[OutlineContextItem] = []
-    for node in outline.nodes.values():
-        if current_block_id and node.heading_block_id == current_block_id:
-            break
-        items.append(
-            OutlineContextItem(
-                block_id=node.heading_block_id,
-                level=node.level,
-                text_preview=node.title[:160],
-            )
-        )
-        if len(items) >= max_items:
-            break
+    Derive a compact outline list (up to max_items) for prompt context (Appendix J8).
 
-    return items
+    Returns: ancestor chain of current block + bounded nearby sibling headings.
+    Works even when current_block_id is a non-heading block (paragraph etc.) — finds
+    the nearest preceding heading node and uses its ancestor chain.
+
+    This prevents front-of-book bias in long documents (e.g. 100-page books where
+    chunk 20 should not see Chapter 1 headings as primary context).
+    """
+    if not current_block_id or not outline.nodes:
+        # No context available: return up to max_items from the beginning
+        items: list[OutlineContextItem] = []
+        for node in outline.nodes.values():
+            items.append(
+                OutlineContextItem(
+                    block_id=node.heading_block_id,
+                    level=node.level,
+                    text_preview=node.title[:160],
+                )
+            )
+            if len(items) >= max_items:
+                break
+        return items
+
+    if ordered_block_ids is None:
+        ordered_block_ids = outline._block_order or None
+
+    # Build ordered node list (insertion order = document order)
+    ordered_nodes = list(outline.nodes.values())
+
+    # Build block_id → node index map for heading blocks
+    heading_id_to_idx: dict[str, int] = {
+        node.heading_block_id: i for i, node in enumerate(ordered_nodes)
+    }
+
+    # Find the nearest preceding heading node for current_block_id.  Chunking has
+    # the complete draft order, so use it when available; block IDs are opaque and
+    # must not be sorted lexicographically as a proxy for document position.
+    current_node_idx: int | None = heading_id_to_idx.get(current_block_id)
+    if current_node_idx is None:
+        if ordered_block_ids is not None:
+            order = {block_id: i for i, block_id in enumerate(ordered_block_ids)}
+            current_order = order.get(current_block_id)
+            if current_order is not None:
+                preceding = [
+                    (i, order[node.heading_block_id])
+                    for i, node in enumerate(ordered_nodes)
+                    if node.heading_block_id in order
+                    and order[node.heading_block_id] <= current_order
+                ]
+                if preceding:
+                    current_node_idx = max(preceding, key=lambda pair: pair[1])[0]
+        else:
+            # Backwards-compatible fallback for callers that only have an outline.
+            # Section endpoints are preferred; lexical comparison is only the last
+            # resort for legacy synthetic IDs.
+            endpoint_matches = [
+                i
+                for i, node in enumerate(ordered_nodes)
+                if current_block_id in (node.first_block_id, node.last_block_id)
+            ]
+            current_node_idx = endpoint_matches[-1] if endpoint_matches else None
+            if current_node_idx is None:
+                best_idx = None
+                for i, node in enumerate(ordered_nodes):
+                    if node.heading_block_id <= current_block_id:
+                        best_idx = i
+                    else:
+                        break
+                current_node_idx = best_idx
+
+    if current_node_idx is None:
+        # current block is before all headings — return first max_items
+        items = []
+        for node in ordered_nodes[:max_items]:
+            items.append(
+                OutlineContextItem(
+                    block_id=node.heading_block_id,
+                    level=node.level,
+                    text_preview=node.title[:160],
+                )
+            )
+        return items
+
+    current_node = ordered_nodes[current_node_idx]
+
+    # Build ancestor chain (current → parent → grandparent → ... → root)
+    ancestors: list[OutlineNode] = []
+    ancestor_node_ids: set[str] = set()
+    cursor_node = current_node
+    while True:
+        if cursor_node.node_id in ancestor_node_ids:
+            break  # cycle guard
+        ancestors.append(cursor_node)
+        ancestor_node_ids.add(cursor_node.node_id)
+        if cursor_node.parent_node_id and cursor_node.parent_node_id in outline.nodes:
+            cursor_node = outline.nodes[cursor_node.parent_node_id]
+        else:
+            break
+    # Reverse so root ancestor is first
+    ancestors.reverse()
+
+    result: list[OutlineContextItem] = []
+    seen_node_ids: set[str] = set()
+
+    def _add(node: OutlineNode) -> None:
+        if node.node_id not in seen_node_ids and len(result) < max_items:
+            seen_node_ids.add(node.node_id)
+            result.append(
+                OutlineContextItem(
+                    block_id=node.heading_block_id,
+                    level=node.level,
+                    text_preview=node.title[:160],
+                )
+            )
+
+    # 1. Ancestor chain (includes current)
+    for anc in ancestors:
+        _add(anc)
+
+    # 2. Preceding siblings at current level (up to 3, nearest first)
+    sibling_budget = min(3, max_items - len(result))
+    if sibling_budget > 0:
+        preceding_siblings: list[OutlineNode] = []
+        for i in range(current_node_idx - 1, -1, -1):
+            node = ordered_nodes[i]
+            if node.node_id in seen_node_ids:
+                continue
+            if node.level == current_node.level:
+                preceding_siblings.append(node)
+                if len(preceding_siblings) >= sibling_budget:
+                    break
+            elif node.level < current_node.level:
+                break  # hit parent level — stop
+        for sib in reversed(preceding_siblings):
+            _add(sib)
+
+    # 3. Following sibling headings (up to 2, for future context)
+    following_budget = min(2, max_items - len(result))
+    if following_budget > 0:
+        following_count = 0
+        for i in range(current_node_idx + 1, len(ordered_nodes)):
+            if following_count >= following_budget:
+                break
+            node = ordered_nodes[i]
+            if node.node_id in seen_node_ids:
+                continue
+            if (
+                node.parent_node_id == current_node.parent_node_id
+                and node.level == current_node.level
+            ):
+                _add(node)
+                following_count += 1
+
+    return result

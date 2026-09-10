@@ -115,6 +115,14 @@ class JobPaths:
         return self.root / "validation"
 
     @property
+    def package_stage_json(self) -> Path:
+        return self.root / "package-stage.json"
+
+    @property
+    def validate_stage_json(self) -> Path:
+        return self.validation_dir / "stage.json"
+
+    @property
     def epubcheck_json_file(self) -> Path:
         return self.validation_dir / "epubcheck.json"
 
@@ -137,6 +145,10 @@ class JobPaths:
     @property
     def qa_report_json(self) -> Path:
         return self.qa_dir / "report.json"
+
+    @property
+    def qa_stage_json(self) -> Path:
+        return self.qa_dir / "stage.json"
 
     @property
     def logs_dir(self) -> Path:
@@ -206,8 +218,24 @@ class JobPaths:
         return self.semantic_visual_dir / "crops"
 
     @property
+    def semantic_visual_stage_json(self) -> Path:
+        return self.semantic_visual_dir / "stage.json"
+
+    @property
+    def semantic_visual_ir_json(self) -> Path:
+        return self.semantic_visual_dir / "bookir.json"
+
+    @property
+    def semantic_visual_audits_json(self) -> Path:
+        return self.semantic_visual_dir / "audits.json"
+
+    @property
     def semantic_ocr_corrections_json(self) -> Path:
         return self.semantic_dir / "ocr-corrections.json"
+
+    @property
+    def semantic_ocr_stage_json(self) -> Path:
+        return self.semantic_dir / "ocr-stage.json"
 
     @property
     def presentation_dir(self) -> Path:
@@ -220,6 +248,18 @@ class JobPaths:
     @property
     def presentation_style_pages_json(self) -> Path:
         return self.presentation_dir / "style-pages.json"
+
+    @property
+    def presentation_stage_json(self) -> Path:
+        return self.presentation_dir / "stage.json"
+
+    @property
+    def typography_stage_json(self) -> Path:
+        return self.presentation_dir / "typography-stage.json"
+
+    @property
+    def render_stage_json(self) -> Path:
+        return self.render_dir / "stage.json"
 
     @property
     def presentation_normalization_report_json(self) -> Path:

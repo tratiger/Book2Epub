@@ -14,6 +14,7 @@ across chunks, which would silently corrupt the BookIR.
 import logging
 from collections import Counter
 
+from book2epub.semantic.book_state import BookStateObservationBatch
 from book2epub.semantic.chunking import SemanticChunkInput
 from book2epub.semantic.decisions import SemanticDecisionBatch
 from book2epub.semantic.structure import StructureDecisionBatch
@@ -250,4 +251,41 @@ def filter_out_of_scope_semantic_decisions(
         schema_version=batch.schema_version,
         chunk_id=batch.chunk_id,
         decisions=good_decisions,
+        observations=batch.observations,
     )
+
+
+def validate_book_state_observation_scope(
+    observation: BookStateObservationBatch,
+    chunk: SemanticChunkInput,
+) -> list[str]:
+    """Validate an inline BookState observation against its exact chunk scope."""
+    if observation.chunk_id != chunk.chunk_id:
+        raise ScopeValidationError(
+            f"BookStateObservationBatch chunk_id={observation.chunk_id!r} does not match "
+            f"expected chunk_id={chunk.chunk_id!r}"
+        )
+
+    valid_ids = _chunk_block_ids(chunk)
+    violations: list[str] = []
+    for field_name in (
+        "heading_patterns",
+        "preformatted_conventions",
+        "callout_conventions",
+        "numbering_conventions",
+    ):
+        for item in getattr(observation, field_name):
+            for block_id in item.example_block_ids:
+                if block_id not in valid_ids:
+                    violations.append(
+                        f"BookState observation {field_name} example_block_id={block_id!r} "
+                        f"is not in chunk {chunk.chunk_id!r}"
+                    )
+
+    for item in observation.domain_terms:
+        if item.source_block_id not in valid_ids:
+            violations.append(
+                f"BookState observation domain term source_block_id="
+                f"{item.source_block_id!r} is not in chunk {chunk.chunk_id!r}"
+            )
+    return violations

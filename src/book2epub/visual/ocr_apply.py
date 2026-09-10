@@ -29,6 +29,7 @@ from book2epub.ir.models import (
     SourceTextSegment,
     Table,
     Text,
+    replace_source_segment_text,
 )
 from book2epub.ir.serializer import save_bookir
 from book2epub.ir.text_join import join_prose_texts
@@ -84,12 +85,7 @@ def _replace_inlines(
                 if key in replacements:
                     new_t = replacements[key]
                     modified_segs.append(
-                        seg.model_copy(
-                            update={
-                                "text": new_t,
-                                "text_sha256": compute_text_sha256(new_t),
-                            }
-                        )
+                        replace_source_segment_text(seg, new_t)
                     )
                     seg_changed = True
                 else:
@@ -751,4 +747,3 @@ def run_ocr_correction(
         len(audits) - len(applied_replacements),
     )
     return corrected_ir, audits
-

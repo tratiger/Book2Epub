@@ -6,7 +6,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from book2epub.ir.models import Block, CodeBlock, Heading
+from book2epub.ir.models import (
+    Block,
+    CodeBlock,
+    ExampleBlock,
+    ExerciseBlock,
+    Figure,
+    Heading,
+    Table,
+)
 from book2epub.semantic.models import SemanticEvidenceBlock
 
 
@@ -189,14 +197,40 @@ def detect_numbering_family(
     return text, "other"
 
 
+def _observe_numbering(
+    kind: str,
+    label_text: str,
+    numbering_map: dict[tuple[str, str], list[str]],
+) -> None:
+    """
+    Observe a verbatim caption/label text and record its numbering family.
+    Stores only verbatim labels — never generates numbers.
+    """
+    label_stripped = label_text.strip()
+    if not label_stripped:
+        return
+    _, family = detect_numbering_family(label_stripped)
+    key = (kind, family)
+    if key not in numbering_map:
+        numbering_map[key] = []
+    if len(numbering_map[key]) < 8 and label_stripped not in numbering_map[key]:
+        numbering_map[key].append(label_stripped)
+
+
 def compute_initial_book_state(
     blocks: list[Block],
     evidence_blocks: list[SemanticEvidenceBlock] | None = None,
 ) -> BookState:
     """
     Compute initial deterministic BookState fields without an LLM (M8 spec Section 9).
+
+    Numbering conventions are observed from verbatim source caption/label text only.
+    Numbers are never generated.
     """
+    from book2epub.semantic.apply import extract_inlines_text
+
     code_languages: set[str] = set()
+    # (kind, family) -> list[verbatim label strings]
     numbering_map: dict[tuple[str, str], list[str]] = {}
     heading_pattern_map: dict[tuple[str, int], list[str]] = {}
 
@@ -207,8 +241,6 @@ def compute_initial_book_state(
                 code_languages.add(lang_clean)
 
         if isinstance(blk, Heading):
-            from book2epub.semantic.apply import extract_inlines_text
-
             text = extract_inlines_text(blk.inlines).strip()
             lvl_raw = blk.level if blk.level is not None else 1
             level = max(1, min(6, lvl_raw))
@@ -228,6 +260,36 @@ def compute_initial_book_state(
                 heading_pattern_map[key] = []
             if len(heading_pattern_map[key]) < 8:
                 heading_pattern_map[key].append(blk.id)
+
+        elif isinstance(blk, Figure):
+            # Caption prefix (e.g. "Figure 1-2: ..." or "図1.3 ...")
+            if blk.caption:
+                cap_text = extract_inlines_text(blk.caption)
+                _observe_numbering("figure", cap_text, numbering_map)
+
+        elif isinstance(blk, Table):
+            # Caption prefix (e.g. "Table 3.1: ..." or "表2-5 ...")
+            if blk.caption:
+                cap_text = extract_inlines_text(blk.caption)
+                _observe_numbering("table", cap_text, numbering_map)
+
+        elif isinstance(blk, CodeBlock):
+            # Caption prefix for listings (e.g. "Listing 2-3: ..." or "リスト1.4 ...")
+            if blk.caption:
+                cap_text = extract_inlines_text(blk.caption)
+                _observe_numbering("listing", cap_text, numbering_map)
+
+        elif isinstance(blk, ExampleBlock):
+            # Label prefix (e.g. "Example 5.2" or "例1-3")
+            if blk.label:
+                lbl_text = extract_inlines_text(blk.label)
+                _observe_numbering("example", lbl_text, numbering_map)
+
+        elif isinstance(blk, ExerciseBlock):
+            # Label prefix (e.g. "Exercise 4.1" or "練習1-2")
+            if blk.label:
+                lbl_text = extract_inlines_text(blk.label)
+                _observe_numbering("exercise", lbl_text, numbering_map)
 
     heading_patterns: list[HeadingPattern] = []
     for (fam, lvl), ex_ids in heading_pattern_map.items():
@@ -275,6 +337,14 @@ def merge_book_state_observations(
     """
     updated = state.model_copy(deep=True)
     updated.revision += 1
+    known_block_ids = set(evidence_lookup)
+
+    def valid_examples(ids: list[str]) -> list[str]:
+        # Empty evidence maps are useful in isolated unit tests; production
+        # merges always receive the complete evidence lookup.
+        if not known_block_ids:
+            return ids[:8]
+        return [block_id for block_id in ids if block_id in known_block_ids][:8]
 
     # 1. Merge heading patterns (merge on family + likely_level)
     for hp_obs in obs.heading_patterns:
@@ -290,7 +360,7 @@ def merge_book_state_observations(
         if existing:
             # Weighted average confidence
             existing.confidence = round((existing.confidence + hp_obs.confidence) / 2.0, 3)
-            for ex in hp_obs.example_block_ids:
+            for ex in valid_examples(hp_obs.example_block_ids):
                 if ex not in existing.example_block_ids and len(existing.example_block_ids) < 8:
                     existing.example_block_ids.append(ex)
         else:
@@ -300,7 +370,7 @@ def merge_book_state_observations(
                         pattern_id=f"hp-{hp_obs.numbering_family}-{hp_obs.likely_level}",
                         numbering_family=hp_obs.numbering_family,
                         likely_level=hp_obs.likely_level,
-                        example_block_ids=hp_obs.example_block_ids[:8],
+                        example_block_ids=valid_examples(hp_obs.example_block_ids),
                         confidence=hp_obs.confidence,
                     )
                 )
@@ -318,7 +388,7 @@ def merge_book_state_observations(
         )
         if existing_pf:
             existing_pf.confidence = round((existing_pf.confidence + pf_obs.confidence) / 2.0, 3)
-            for ex in pf_obs.example_block_ids:
+            for ex in valid_examples(pf_obs.example_block_ids):
                 if (
                     ex not in existing_pf.example_block_ids
                     and len(existing_pf.example_block_ids) < 8
@@ -331,7 +401,7 @@ def merge_book_state_observations(
                         convention_id=f"pfc-{pf_obs.subtype}-{norm_lang or 'none'}",
                         subtype=pf_obs.subtype,
                         language_or_shell=norm_lang,
-                        example_block_ids=pf_obs.example_block_ids[:8],
+                        example_block_ids=valid_examples(pf_obs.example_block_ids),
                         confidence=pf_obs.confidence,
                     )
                 )
@@ -347,7 +417,7 @@ def merge_book_state_observations(
             for cue in co_obs.textual_cues:
                 if cue not in existing_co.textual_cues and len(existing_co.textual_cues) < 8:
                     existing_co.textual_cues.append(cue)
-            for ex in co_obs.example_block_ids:
+            for ex in valid_examples(co_obs.example_block_ids):
                 if (
                     ex not in existing_co.example_block_ids
                     and len(existing_co.example_block_ids) < 8
@@ -360,12 +430,43 @@ def merge_book_state_observations(
                         convention_id=f"coc-{co_obs.subtype}",
                         subtype=co_obs.subtype,
                         textual_cues=co_obs.textual_cues[:8],
-                        example_block_ids=co_obs.example_block_ids[:8],
+                        example_block_ids=valid_examples(co_obs.example_block_ids),
                         confidence=co_obs.confidence,
                     )
                 )
 
-    # 4. Merge domain terms (enforcing verbatim check in source block)
+    # 4. Merge numbering conventions on kind + family. Labels are kept exactly
+    # as supplied by source evidence; no numbering is generated here.
+    for num_obs in obs.numbering_conventions:
+        existing_num = next(
+            (
+                item
+                for item in updated.numbering_conventions
+                if item.kind == num_obs.kind and item.family == num_obs.family
+            ),
+            None,
+        )
+        if existing_num:
+            existing_num.confidence = round(
+                (existing_num.confidence + num_obs.confidence) / 2.0, 3
+            )
+            for label in num_obs.example_labels:
+                if (
+                    label not in existing_num.example_labels
+                    and len(existing_num.example_labels) < 8
+                ):
+                    existing_num.example_labels.append(label)
+        elif len(updated.numbering_conventions) < 12:
+            updated.numbering_conventions.append(
+                NumberingConvention(
+                    kind=num_obs.kind,
+                    family=num_obs.family,
+                    example_labels=num_obs.example_labels[:8],
+                    confidence=num_obs.confidence,
+                )
+            )
+
+    # 5. Merge domain terms (enforcing verbatim check in source block)
     for dt_obs in obs.domain_terms:
         term = dt_obs.term.strip()
         if not term:
@@ -431,5 +532,13 @@ def get_book_state_prompt_view(state: BookState) -> dict[str, Any]:
             }
             for cc in state.callout_conventions[:6]
         ],
-        "domain_terms": [t.normalized_key for t in state.domain_terms[:30]],
+        "numbering_conventions": [
+            {
+                "kind": nc.kind,
+                "family": nc.family,
+                "example_labels": nc.example_labels[:4],
+            }
+            for nc in state.numbering_conventions[:12]
+        ],
+        "domain_terms": [t.normalized_key for t in state.domain_terms[:20]],
     }

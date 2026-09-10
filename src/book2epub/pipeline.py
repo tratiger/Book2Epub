@@ -7,13 +7,20 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from book2epub.cache import (
+    compute_ocr_cache_key,
+    compute_visual_cache_key,
+    hash_model,
+    stable_hash,
+    stage_cache_hit,
+)
 from book2epub.config import JobConfig
 from book2epub.ingest.pdf import create_source_pdf
 from book2epub.ingest.scanner import scan_and_validate_directory
 from book2epub.ir.adapter import MiddleJsonAdapter
 from book2epub.ir.models import BookIR, BookMetadata
 from book2epub.ir.normalize import normalize_bookir
-from book2epub.ir.serializer import save_bookir
+from book2epub.ir.serializer import load_bookir, save_bookir
 from book2epub.logging import configure_logging
 from book2epub.mineru.cache import (
     is_mineru_cache_valid,
@@ -30,6 +37,7 @@ from book2epub.mineru.validate import (
 from book2epub.package import EpubPackager, PackagingResult
 from book2epub.paths import JobPaths, create_job_paths, get_epubcheck_jar_path
 from book2epub.qa import QAReportData, QAViolation, generate_qa_report
+from book2epub.qa.stage import StageState, record_stage_status
 from book2epub.render import ReflowRenderer, RenderResult
 from book2epub.util.hashing import compute_mineru_cache_key
 
@@ -167,6 +175,14 @@ def run_conversion_m2(
 
     Returns (raw_ir, normalized_ir).
     """
+    # Propagate invalidation downstream without changing the semantic provider
+    # decision: visual/OCR/presentation depend on semantic output, while a
+    # visual force must not cause semantic provider calls.
+    if cfg.app.force_semantic:
+        cfg.app.force_visual = True
+        cfg.app.force_presentation = True
+    elif cfg.app.force_visual:
+        cfg.app.force_presentation = True
     logger.info("[Stage 3/6] Converting middle.json to BookIR...")
 
     with canonical_middle_json.open("r", encoding="utf-8") as f:
@@ -268,19 +284,112 @@ def run_conversion_m2(
             visual_source = VisualSource.resolve(cfg, paths=paths)
             if visual_source.has_visual:
                 vis_provider = create_provider(cfg, purpose="visual")
-                semantic_ir, updated_audits, ocr_recommended_block_ids = run_visual_arbitration(
-                    bookir=semantic_ir,
-                    evidence=evidence_book,
-                    draft=draft_book,
-                    audits=semantic_result.audits,
-                    cfg=cfg,
-                    paths=paths,
-                    visual_source=visual_source,
-                    provider=vis_provider,
-                    raw_ir=raw_ir,
-                    struct_decisions=semantic_result.struct_decisions,
-                    semantic_decisions=semantic_result.semantic_decisions,
+                from book2epub.semantic.schemas import build_provider_schema
+                from book2epub.visual.arbitration import (
+                    VISUAL_ARBITRATION_SYSTEM_INSTRUCTION,
+                    VISUAL_ARBITRATION_USER_PROMPT,
+                    run_visual_arbitration,
                 )
+                from book2epub.visual.models import VisualSemanticBatch
+
+                visual_key = compute_visual_cache_key(
+                    semantic_decision_hash=stable_hash(
+                        [a.model_dump() for a in semantic_result.audits]
+                    ),
+                    evidence_hash=hash_model(evidence_book),
+                    visual_hash=visual_source.source_hash,
+                    provider=vis_provider.name,
+                    model=vis_provider.model,
+                    prompt=VISUAL_ARBITRATION_SYSTEM_INSTRUCTION + VISUAL_ARBITRATION_USER_PROMPT,
+                    schema=build_provider_schema(VisualSemanticBatch),
+                    mode=cfg.semantic.vision,
+                    thresholds={
+                        "auto_apply": cfg.semantic.auto_apply_threshold,
+                        "review_floor": cfg.semantic.review_floor,
+                    },
+                )
+                visual_outputs = (
+                    paths.semantic_visual_ir_json,
+                    paths.semantic_visual_audits_json,
+                )
+                if not cfg.app.force_visual and stage_cache_hit(
+                    paths.semantic_visual_stage_json, visual_key, visual_outputs
+                ):
+                    semantic_ir = load_bookir(paths.semantic_visual_ir_json)
+                    visual_payload = json.loads(
+                        paths.semantic_visual_audits_json.read_text(encoding="utf-8")
+                    )
+                    from book2epub.semantic.decisions import SemanticAuditRecord
+
+                    updated_audits = [
+                        SemanticAuditRecord.model_validate(item)
+                        for item in visual_payload.get("audits", [])
+                    ]
+                    ocr_recommended_block_ids = set(
+                        visual_payload.get("ocr_recommended_block_ids", [])
+                    )
+                    record_stage_status(
+                        paths.semantic_visual_stage_json,
+                        "semantic_visual",
+                        StageState.CACHE_HIT,
+                        input_hash=visual_key,
+                        cache_key=visual_key,
+                        provider=vis_provider.name,
+                        model=vis_provider.model,
+                        output_artifact=str(paths.semantic_visual_ir_json),
+                        reason="visual arbitration cache hit",
+                    )
+                else:
+                    record_stage_status(
+                        paths.semantic_visual_stage_json,
+                        "semantic_visual",
+                        StageState.RUNNING,
+                        input_hash=visual_key,
+                        cache_key=visual_key,
+                        provider=vis_provider.name,
+                        model=vis_provider.model,
+                        reason="visual arbitration requested",
+                    )
+                    semantic_ir, updated_audits, ocr_recommended_block_ids = (
+                        run_visual_arbitration(
+                            bookir=semantic_ir,
+                            evidence=evidence_book,
+                            draft=draft_book,
+                            audits=semantic_result.audits,
+                            cfg=cfg,
+                            paths=paths,
+                            visual_source=visual_source,
+                            provider=vis_provider,
+                            raw_ir=raw_ir,
+                            struct_decisions=semantic_result.struct_decisions,
+                            semantic_decisions=semantic_result.semantic_decisions,
+                        )
+                    )
+                    paths.semantic_visual_ir_json.parent.mkdir(parents=True, exist_ok=True)
+                    save_bookir(semantic_ir, paths.semantic_visual_ir_json)
+                    paths.semantic_visual_audits_json.write_text(
+                        json.dumps(
+                            {
+                                "audits": [a.model_dump() for a in updated_audits],
+                                "ocr_recommended_block_ids": sorted(
+                                    ocr_recommended_block_ids
+                                ),
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    record_stage_status(
+                        paths.semantic_visual_stage_json,
+                        "semantic_visual",
+                        StageState.COMPLETE,
+                        input_hash=visual_key,
+                        cache_key=visual_key,
+                        provider=vis_provider.name,
+                        model=vis_provider.model,
+                        output_artifact=str(paths.semantic_visual_ir_json),
+                        reason="visual arbitration complete",
+                    )
                 save_bookir(semantic_ir, paths.ir_semantic_json)
                 # Write authoritative final audit artifact (M9-updated).
                 # applied.m8.json (written by stage.py) remains as the M8-only provisional.
@@ -288,25 +397,121 @@ def run_conversion_m2(
                     json.dumps([a.model_dump() for a in updated_audits], indent=2),
                     encoding="utf-8",
                 )
+            else:
+                record_stage_status(
+                    paths.semantic_visual_stage_json,
+                    "semantic_visual",
+                    StageState.SKIPPED,
+                    reason="no source visual evidence",
+                )
+        else:
+            record_stage_status(
+                paths.semantic_visual_stage_json,
+                "semantic_visual",
+                StageState.SKIPPED,
+                reason="semantic.vision=off",
+            )
     else:
         semantic_ir = raw_ir
+        record_stage_status(
+            paths.semantic_stage_json,
+            "semantic_structure",
+            StageState.SKIPPED,
+            reason="semantic.enabled=false",
+        )
 
     # M9 Multimodal OCR Correction (safe | all)
     if cfg.ocr_correction.mode in ("safe", "all"):
+        from book2epub.providers.factory import create_provider
+        from book2epub.semantic.schemas import build_provider_schema
+        from book2epub.visual.models import OCRCorrectionBatch
         from book2epub.visual.ocr_apply import run_ocr_correction
+        from book2epub.visual.ocr_candidates import iter_ocr_eligible_segments
+        from book2epub.visual.ocr_schema import (
+            OCR_PROPOSAL_SYSTEM_INSTRUCTION,
+            OCR_PROPOSAL_USER_PROMPT,
+        )
         from book2epub.visual.source import VisualSource
 
         visual_source = VisualSource.resolve(cfg, paths=paths)
-        corrected_ir, _ = run_ocr_correction(
-            bookir=semantic_ir,
-            evidence=evidence_book,
-            cfg=cfg,
-            paths=paths,
-            visual_source=visual_source,
-            ocr_recommended_block_ids=ocr_recommended_block_ids,
+        ocr_provider = create_provider(cfg, purpose="ocr")
+        candidate_old_hash = stable_hash(
+            [
+                {
+                    "block_id": s.block_id,
+                    "segment_id": s.segment_id,
+                    "old_sha256": s.text_sha256,
+                }
+                for s in iter_ocr_eligible_segments(semantic_ir.blocks, cfg.ocr_correction.mode)
+            ]
         )
+        ocr_key = compute_ocr_cache_key(
+            pre_ocr_ir_hash=hash_model(semantic_ir),
+            candidate_old_hash=candidate_old_hash,
+            visual_hash=visual_source.source_hash,
+            mode=cfg.ocr_correction.mode,
+            provider=ocr_provider.name,
+            model=ocr_provider.model,
+            prompt=OCR_PROPOSAL_SYSTEM_INSTRUCTION + OCR_PROPOSAL_USER_PROMPT,
+            schema=build_provider_schema(OCRCorrectionBatch),
+            policy_version="M9-ocr-policy-1.0",
+        )
+        if not cfg.app.force_visual and stage_cache_hit(
+            paths.semantic_ocr_stage_json,
+            ocr_key,
+            (paths.ir_corrected_json, paths.semantic_ocr_corrections_json),
+        ):
+            corrected_ir = load_bookir(paths.ir_corrected_json)
+            record_stage_status(
+                paths.semantic_ocr_stage_json,
+                "ocr_correction",
+                StageState.CACHE_HIT,
+                input_hash=ocr_key,
+                cache_key=ocr_key,
+                provider=ocr_provider.name,
+                model=ocr_provider.model,
+                output_artifact=str(paths.ir_corrected_json),
+                reason="OCR correction cache hit",
+            )
+        else:
+            record_stage_status(
+                paths.semantic_ocr_stage_json,
+                "ocr_correction",
+                StageState.RUNNING,
+                input_hash=ocr_key,
+                cache_key=ocr_key,
+                provider=ocr_provider.name,
+                model=ocr_provider.model,
+                reason="OCR correction requested",
+            )
+            corrected_ir, _ = run_ocr_correction(
+                bookir=semantic_ir,
+                evidence=evidence_book,
+                cfg=cfg,
+                paths=paths,
+                visual_source=visual_source,
+                provider=ocr_provider,
+                ocr_recommended_block_ids=ocr_recommended_block_ids,
+            )
+            record_stage_status(
+                paths.semantic_ocr_stage_json,
+                "ocr_correction",
+                StageState.COMPLETE,
+                input_hash=ocr_key,
+                cache_key=ocr_key,
+                provider=ocr_provider.name,
+                model=ocr_provider.model,
+                output_artifact=str(paths.ir_corrected_json),
+                reason="OCR correction complete",
+            )
     else:
         corrected_ir = semantic_ir
+        record_stage_status(
+            paths.semantic_ocr_stage_json,
+            "ocr_correction",
+            StageState.SKIPPED,
+            reason="ocr_correction.mode=off",
+        )
 
     logger.info("Applying normalization (cross-page joins, page labels, layout hints)...")
     normalized_ir = normalize_bookir(corrected_ir, raw_page_number_texts=raw_page_number_texts)
@@ -352,9 +557,34 @@ def run_conversion_m3(
             "[Typography] Running whitespace and list normalization (mode=%s)...",
             cfg.presentation.mode,
         )
+        typography_key = stable_hash(
+            {
+                "ir": hash_model(normalized_ir),
+                "profile": hash_model(profile) if profile is not None else None,
+                "rules": "M11-typography-1.0",
+            }
+        )
+        record_stage_status(
+            paths.typography_stage_json,
+            "typography",
+            StageState.RUNNING,
+            input_hash=typography_key,
+            cache_key=typography_key,
+            output_artifact=str(paths.ir_typography_json),
+            reason="typography normalization requested",
+        )
         render_ir, norm_report = typography_normalize_bookir(normalized_ir, profile=profile)
         save_bookir(render_ir, paths.ir_typography_json)
         save_normalization_report(norm_report, paths.normalization_report_file)
+        record_stage_status(
+            paths.typography_stage_json,
+            "typography",
+            StageState.COMPLETE,
+            input_hash=typography_key,
+            cache_key=typography_key,
+            output_artifact=str(paths.ir_typography_json),
+            reason="typography normalization complete",
+        )
         logger.info(
             "[Typography] Reconstructed %d text segments, %d markers extracted, %d dehyphenations",
             norm_report.source_segment_reconstructions,
@@ -365,6 +595,23 @@ def run_conversion_m3(
     logger.info(
         "[Stage 4/6] Rendering BookIR to reflowable XHTML/MathML (presentation=%s)...",
         cfg.presentation.mode,
+    )
+    render_key = stable_hash(
+        {
+            "ir": hash_model(render_ir),
+            "presentation_mode": cfg.presentation.mode,
+            "profile": hash_model(profile) if profile is not None else None,
+            "renderer": "M10-render-1.0",
+        }
+    )
+    record_stage_status(
+        paths.render_stage_json,
+        "render",
+        StageState.RUNNING,
+        input_hash=render_key,
+        cache_key=render_key,
+        output_artifact=str(paths.render_oebps_dir),
+        reason="render requested",
     )
     renderer = ReflowRenderer(
         output_dir=paths.render_dir,
@@ -383,6 +630,15 @@ def run_conversion_m3(
         result.figure_count + result.chart_count,
         result.table_count,
     )
+    record_stage_status(
+        paths.render_stage_json,
+        "render",
+        StageState.COMPLETE,
+        input_hash=render_key,
+        cache_key=render_key,
+        output_artifact=str(paths.render_oebps_dir),
+        reason="render complete",
+    )
     return result
 
 
@@ -399,6 +655,30 @@ def run_conversion_m4(
     Returns PackagingResult.
     """
     logger.info("[Stage 5/6] Packaging reflowable EPUB 3.3 and validating with EPUBCheck...")
+    package_key = stable_hash(
+        {
+            "render_manifest": render_result.manifest.to_dict(),
+            "packager": "M4-package-1.0",
+        }
+    )
+    record_stage_status(
+        paths.package_stage_json,
+        "package",
+        StageState.RUNNING,
+        input_hash=package_key,
+        cache_key=package_key,
+        output_artifact=str(output_epub),
+        reason="package requested",
+    )
+    record_stage_status(
+        paths.validate_stage_json,
+        "validate",
+        StageState.RUNNING,
+        input_hash=package_key,
+        cache_key=package_key,
+        output_artifact=str(paths.epubcheck_json_file),
+        reason="EPUBCheck requested",
+    )
     packager = EpubPackager(
         epubcheck_jar=get_epubcheck_jar_path(),
         strict=cfg.app.strict,
@@ -416,6 +696,24 @@ def run_conversion_m4(
         "=== Milestone M4 Complete: %s (%.2f MB, EPUBCheck PASS) ===",
         output_epub,
         res.file_size_bytes / (1024 * 1024),
+    )
+    record_stage_status(
+        paths.package_stage_json,
+        "package",
+        StageState.COMPLETE,
+        input_hash=package_key,
+        cache_key=package_key,
+        output_artifact=str(output_epub),
+        reason="package complete",
+    )
+    record_stage_status(
+        paths.validate_stage_json,
+        "validate",
+        StageState.COMPLETE,
+        input_hash=package_key,
+        cache_key=package_key,
+        output_artifact=str(paths.epubcheck_json_file),
+        reason="EPUBCheck complete",
     )
     return res
 
@@ -437,6 +735,22 @@ def run_conversion_m5(
       qa/report.html
     """
     logger.info("[Stage 6/6] Generating comprehensive QA report and reconciliation checks...")
+    qa_key = stable_hash(
+        {
+            "book_ir": hash_model(book_ir),
+            "render_manifest": render_result.manifest.to_dict(),
+            "qa": "M12-qa-1.0",
+        }
+    )
+    record_stage_status(
+        paths.qa_stage_json,
+        "qa",
+        StageState.RUNNING,
+        input_hash=qa_key,
+        cache_key=qa_key,
+        output_artifact=str(paths.qa_report_json),
+        reason="QA requested",
+    )
     with raw_middle_path.open("r", encoding="utf-8") as f:
         raw_middle_data = json.load(f)
 
@@ -593,6 +907,15 @@ def run_conversion_m5(
             )
 
     logger.info("=== Milestone M5 Complete: QA report at %s ===", paths.qa_report_html)
+    record_stage_status(
+        paths.qa_stage_json,
+        "qa",
+        StageState.COMPLETE,
+        input_hash=qa_key,
+        cache_key=qa_key,
+        output_artifact=str(paths.qa_report_json),
+        reason="QA complete",
+    )
     return qa_data
 
 
@@ -603,6 +926,13 @@ def run_pipeline(
     force_mineru: bool = False,
 ) -> PackagingResult:
     """Run full conversion pipeline from input page image directory to validated EPUB."""
+    if force_mineru:
+        # MinerU is the strongest upstream invalidation boundary.  Keep the
+        # caller's config immutable while forcing every dependent stage.
+        cfg = cfg.model_copy(deep=True)
+        cfg.app.force_semantic = True
+        cfg.app.force_visual = True
+        cfg.app.force_presentation = True
     # Execute through M1
     paths, canonical_middle = run_conversion_m1(input_dir, cfg, force_mineru=force_mineru)
 

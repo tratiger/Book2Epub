@@ -32,6 +32,7 @@ from book2epub.ir.models import (
     Table,
     Text,
     UnknownBlock,
+    replace_source_segment_text,
 )
 from book2epub.presentation.models import BookStyleProfile
 
@@ -67,7 +68,7 @@ def reconstruct_text_inline(
     first_seg = segments[0]
     first_text, coll_count = collapse_intra_segment_spaces(first_seg.text)
     pieces.append(first_text)
-    updated_segments.append(first_seg.model_copy(update={"text": first_text}))
+    updated_segments.append(replace_source_segment_text(first_seg, first_text))
 
     # 2. Subsequent segments
     for i in range(1, len(segments)):
@@ -75,7 +76,7 @@ def reconstruct_text_inline(
         seg_curr = segments[i]
 
         curr_text, c_count = collapse_intra_segment_spaces(seg_curr.text)
-        seg_curr_clean = seg_curr.model_copy(update={"text": curr_text})
+        seg_curr_clean = replace_source_segment_text(seg_curr, curr_text)
 
         boundary = classify_boundary(seg_prev, seg_curr_clean)
         adj_prev, sep, adj_curr, is_dehyphen, reason = decide_inter_segment_separator(
@@ -85,7 +86,7 @@ def reconstruct_text_inline(
         # Update preceding segment if adjusted (e.g. trailing hyphen stripped)
         if adj_prev != seg_prev.text:
             pieces[-1] = adj_prev
-            updated_segments[-1] = seg_prev.model_copy(update={"text": adj_prev})
+            updated_segments[-1] = replace_source_segment_text(seg_prev, adj_prev)
 
         # Track metrics
         if sep == " ":
@@ -106,7 +107,7 @@ def reconstruct_text_inline(
         if sep:
             pieces.append(sep)
         pieces.append(adj_curr)
-        updated_segments.append(seg_curr_clean.model_copy(update={"text": adj_curr}))
+        updated_segments.append(replace_source_segment_text(seg_curr_clean, adj_curr))
 
     reconstructed_text = "".join(pieces)
     report.source_segment_reconstructions += 1
@@ -185,7 +186,9 @@ def normalize_block(
                         if rem > 0 and seg.text.startswith("\u3000"):
                             s_count = 2 if rem >= 2 and seg.text.startswith("\u3000\u3000") else 1
                             rem -= s_count
-                            updated_segs.append(seg.model_copy(update={"text": seg.text[s_count:]}))
+                            updated_segs.append(
+                                replace_source_segment_text(seg, seg.text[s_count:])
+                            )
                         else:
                             updated_segs.append(seg)
                 inlines[0] = inlines[0].model_copy(
@@ -299,4 +302,3 @@ def reconstruct_text_from_source_segments(
     report = NormalizationReport()
     normalized = reconstruct_text_inline(temp_inline, block_id=block_id, report=report)
     return normalized.text
-

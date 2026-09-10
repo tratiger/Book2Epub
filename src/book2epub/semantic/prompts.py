@@ -83,6 +83,11 @@ Use surrounding prose references. Phrases such as "run the following command",
 "the output is", "the following Python program", "Table X shows", "Note", "Warning",
 and Japanese equivalents are strong evidence but must agree with the block contents.
 
+Alongside decisions, return at most one bounded `observations` object. Set its
+`chunk_id` to this exact CHUNK_ID. Include only source-grounded recurring
+conventions and exact domain spellings supported by the supplied block IDs;
+never include model rationale as an observation.
+
 BOOK_STATE:
 {book_state_json}
 

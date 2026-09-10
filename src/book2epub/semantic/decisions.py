@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from book2epub.semantic.book_state import BookStateObservationBatch
 from book2epub.semantic.models import SemanticTarget
 
 SemanticEvidenceCode = Literal[
@@ -49,6 +50,15 @@ class SemanticDecisionBatch(BaseModel):
     schema_version: Literal["1.0"] = "1.0"
     chunk_id: str
     decisions: list[SemanticDecision] = Field(default_factory=list)
+    # Optional inline BookState observations from Pass B (Appendix J4).
+    # Provider returns these alongside decisions so state propagates chunk-to-chunk.
+    observations: list[BookStateObservationBatch] = Field(
+        default_factory=list,
+        description=(
+            "Optional BookStateObservationBatch from this chunk. "
+            "Validated and merged into running BookState before the next chunk."
+        ),
+    )
 
 
 class SemanticConflict(BaseModel):

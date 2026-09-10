@@ -3,9 +3,15 @@
 import json
 import logging
 
+from book2epub.cache import (
+    compute_presentation_cache_key,
+    hash_model,
+    stage_cache_hit,
+)
 from book2epub.config import JobConfig
 from book2epub.ir.models import BookIR
 from book2epub.paths import JobPaths
+from book2epub.qa.stage import StageState, record_stage_status
 
 from .defaults import DEFAULT_ENHANCED_PROFILE
 from .infer import infer_style_profile
@@ -34,6 +40,12 @@ def resolve_style_profile(
 
     if mode == "legacy":
         # Legacy mode: no profile, existing M0-M5 path
+        record_stage_status(
+            paths.presentation_stage_json,
+            "presentation_profile",
+            StageState.SKIPPED,
+            reason="legacy presentation mode",
+        )
         return None, []
 
     paths.presentation_dir.mkdir(parents=True, exist_ok=True)
@@ -45,12 +57,77 @@ def resolve_style_profile(
             profile.model_dump_json(indent=2),
             encoding="utf-8",
         )
+        record_stage_status(
+            paths.presentation_stage_json,
+            "presentation_profile",
+            StageState.COMPLETE,
+            input_hash=hash_model(bookir),
+            cache_key=hash_model(profile),
+            output_artifact=str(paths.presentation_book_style_profile_json),
+            reason="enhanced deterministic profile",
+        )
         return profile, []
 
     if mode == "infer":
+        from book2epub.presentation.infer import (
+            STYLE_INFERENCE_SYSTEM_INSTRUCTION,
+            STYLE_INFERENCE_USER_PROMPT,
+        )
+        from book2epub.presentation.models import BookStyleProfileDecision
+        from book2epub.semantic.schemas import build_provider_schema
         from book2epub.visual.source import VisualSource
 
         visual_source = VisualSource.resolve(cfg, paths=paths)
+        rep_pages = select_representative_pages(bookir, max_pages=8)
+        provider = None
+        provider_name = ""
+        provider_model = ""
+        if visual_source.has_visual:
+            from book2epub.providers.factory import create_provider
+
+            provider = create_provider(cfg, purpose="presentation")
+            provider_name = provider.name
+            provider_model = provider.model
+        presentation_key = compute_presentation_cache_key(
+            representative_pages=rep_pages,
+            visual_hash=visual_source.source_hash,
+            relevant_ir_hash=hash_model(bookir),
+            provider=provider_name,
+            model=provider_model,
+            profile_schema=build_provider_schema(BookStyleProfileDecision),
+            prompt=STYLE_INFERENCE_SYSTEM_INSTRUCTION + STYLE_INFERENCE_USER_PROMPT,
+        )
+        if not cfg.app.force_presentation and stage_cache_hit(
+            paths.presentation_stage_json,
+            presentation_key,
+            (paths.presentation_book_style_profile_json,),
+        ):
+            profile = BookStyleProfile.model_validate_json(
+                paths.presentation_book_style_profile_json.read_text(encoding="utf-8")
+            )
+            record_stage_status(
+                paths.presentation_stage_json,
+                "presentation_profile",
+                StageState.CACHE_HIT,
+                input_hash=presentation_key,
+                cache_key=presentation_key,
+                provider=provider_name or None,
+                model=provider_model or None,
+                output_artifact=str(paths.presentation_book_style_profile_json),
+                reason="presentation profile cache hit",
+            )
+            return profile, []
+
+        record_stage_status(
+            paths.presentation_stage_json,
+            "presentation_profile",
+            StageState.RUNNING,
+            input_hash=presentation_key,
+            cache_key=presentation_key,
+            provider=provider_name or None,
+            model=provider_model or None,
+            reason="presentation profile requested",
+        )
         if not visual_source.has_visual:
             logger.warning(
                 "Presentation mode 'infer' requested but no visual source available. "
@@ -60,7 +137,6 @@ def resolve_style_profile(
             profile = DEFAULT_ENHANCED_PROFILE
         else:
             # Write style-pages.json
-            rep_pages = select_representative_pages(bookir, max_pages=8)
             style_pages_file = paths.presentation_dir / "style-pages.json"
             style_pages_file.write_text(
                 json.dumps({"representative_pages": rep_pages}, indent=2),
@@ -68,9 +144,7 @@ def resolve_style_profile(
             )
 
             try:
-                from book2epub.providers.factory import create_provider
-
-                provider = create_provider(cfg, purpose="presentation")
+                assert provider is not None
                 profile, infer_warnings = infer_style_profile(
                     bookir=bookir,
                     paths=paths,
@@ -89,6 +163,17 @@ def resolve_style_profile(
         paths.presentation_book_style_profile_json.write_text(
             profile.model_dump_json(indent=2),
             encoding="utf-8",
+        )
+        record_stage_status(
+            paths.presentation_stage_json,
+            "presentation_profile",
+            StageState.COMPLETE,
+            input_hash=presentation_key,
+            cache_key=presentation_key,
+            provider=provider_name or None,
+            model=provider_model or None,
+            output_artifact=str(paths.presentation_book_style_profile_json),
+            reason="presentation profile complete",
         )
         return profile, warnings
 

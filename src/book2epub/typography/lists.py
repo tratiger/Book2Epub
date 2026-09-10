@@ -3,7 +3,13 @@
 import re
 from collections import Counter
 
-from book2epub.ir.models import Inline, ListBlock, SourceTextSegment, Text
+from book2epub.ir.models import (
+    Inline,
+    ListBlock,
+    SourceTextSegment,
+    Text,
+    replace_source_segment_text,
+)
 
 from .models import MarkerStyle
 
@@ -134,7 +140,7 @@ def extract_item_leading_marker(
                 else:
                     new_seg_text = seg.text[prefix_to_trim:]
                     prefix_to_trim = 0
-                    updated_segments.append(seg.model_copy(update={"text": new_seg_text}))
+                    updated_segments.append(replace_source_segment_text(seg, new_seg_text))
             else:
                 updated_segments.append(seg)
 

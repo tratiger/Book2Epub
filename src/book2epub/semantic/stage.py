@@ -1,10 +1,15 @@
 """End-to-end document semantic reconstruction stage orchestration
 (M8 spec Section 2, 3, 13, 14)."""
 
+from __future__ import annotations
+
 import json
 import logging
+import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 
+from book2epub.cache import compute_semantic_cache_key
 from book2epub.config import JobConfig
 from book2epub.ir.models import BookIR
 from book2epub.paths import JobPaths
@@ -12,19 +17,24 @@ from book2epub.providers.base import StructuredProvider
 from book2epub.providers.factory import create_provider
 from book2epub.providers.models import StructuredInferenceRequest
 from book2epub.providers.usage import record_provider_usage as _record_provider_usage
+from book2epub.qa.stage import StageState, record_stage_status
 from book2epub.semantic.apply import (
     apply_semantic_decisions,
     apply_structure_decisions,
 )
 from book2epub.semantic.book_state import (
     BookState,
+    BookStateObservationBatch,
     compute_initial_book_state,
+    get_book_state_prompt_view,
+    merge_book_state_observations,
 )
 from book2epub.semantic.chunking import create_semantic_chunks
 from book2epub.semantic.decisions import (
     SemanticAuditRecord,
     SemanticDecisionBatch,
 )
+from book2epub.semantic.hashing import compute_text_sha256
 from book2epub.semantic.models import (
     SemanticDraftBook,
     SemanticEvidenceBook,
@@ -49,11 +59,134 @@ from book2epub.semantic.structure import (
 from book2epub.semantic.validation import (
     filter_out_of_scope_semantic_decisions,
     filter_out_of_scope_structure_decisions,
+    validate_book_state_observation_scope,
     validate_semantic_batch_scope,
     validate_structure_batch_scope,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _semantic_cache_key(
+    raw_ir: BookIR,
+    evidence: SemanticEvidenceBook,
+    cfg: JobConfig,
+    provider: StructuredProvider,
+) -> str:
+    return compute_semantic_cache_key(
+        evidence=evidence,
+        raw_ir=raw_ir,
+        provider=provider.name,
+        model=provider.model,
+        system_prompt="\n".join(
+            [COMMON_SYSTEM_INSTRUCTION, PASS_A_USER_PROMPT_TEMPLATE, PASS_B_USER_PROMPT_TEMPLATE]
+        ),
+        response_schemas=(
+            build_provider_schema(StructureDecisionBatch),
+            build_provider_schema(SemanticDecisionBatch),
+        ),
+        thresholds={
+            "auto_apply": cfg.semantic.auto_apply_threshold,
+            "review_floor": cfg.semantic.review_floor,
+        },
+        chunk_settings={
+            "max_chars": cfg.semantic.max_chunk_chars,
+            "max_blocks": cfg.semantic.max_chunk_blocks,
+            "overlap_blocks": cfg.semantic.overlap_blocks,
+        },
+        observation_contract={
+            "schema_version": "1.0",
+            "schema_hash": compute_text_sha256(
+                json.dumps(
+                    build_provider_schema(BookStateObservationBatch),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+            ),
+        },
+    )
+
+
+def _load_reconciled_decisions(
+    path: Path,
+) -> tuple[dict[str, ReconciledStructureDecision], dict[str, ReconciledSemanticDecision]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    struct = {
+        block_id: ReconciledStructureDecision(**value)
+        for block_id, value in data.get("pass_a", {}).items()
+    }
+    semantic = {
+        block_id: ReconciledSemanticDecision(**value)
+        for block_id, value in data.get("pass_b", {}).items()
+    }
+    return struct, semantic
+
+
+def _materialize_cached_semantic_result(
+    raw_ir: BookIR,
+    evidence: SemanticEvidenceBook,
+    cfg: JobConfig,
+    paths: JobPaths,
+    provider: StructuredProvider,
+    cache_key: str,
+    reconciled_path: Path,
+    state_path: Path,
+) -> SemanticStageResult:
+    evidence_lookup = {b.block_id: b for b in evidence.blocks}
+    struct_decisions, semantic_decisions = _load_reconciled_decisions(reconciled_path)
+    book_state = BookState.model_validate_json(state_path.read_text(encoding="utf-8"))
+    intermediate_blocks, pass_a_audits = apply_structure_decisions(
+        blocks=raw_ir.blocks,
+        decisions=struct_decisions,
+        evidence_lookup=evidence_lookup,
+        auto_apply_threshold=cfg.semantic.auto_apply_threshold,
+    )
+    outline = build_book_outline(intermediate_blocks)
+    final_blocks, pass_b_audits = apply_semantic_decisions(
+        blocks=intermediate_blocks,
+        decisions=semantic_decisions,
+        evidence_lookup=evidence_lookup,
+        auto_apply_threshold=cfg.semantic.auto_apply_threshold,
+    )
+    semantic_ir = raw_ir.model_copy(update={"blocks": final_blocks})
+    audits = pass_a_audits + pass_b_audits
+    paths.semantic_outline_json.write_text(outline.model_dump_json(indent=2), encoding="utf-8")
+    paths.semantic_book_state_json.write_text(
+        book_state.model_dump_json(indent=2), encoding="utf-8"
+    )
+    paths.ir_semantic_json.write_text(semantic_ir.model_dump_json(indent=2), encoding="utf-8")
+    paths.semantic_applied_m8_json.write_text(
+        json.dumps([a.model_dump() for a in audits], indent=2), encoding="utf-8"
+    )
+    paths.semantic_applied_json.write_text(
+        json.dumps([a.model_dump() for a in audits], indent=2), encoding="utf-8"
+    )
+    record_stage_status(
+        paths.semantic_stage_json,
+        "semantic_structure",
+        StageState.CACHE_HIT,
+        input_hash=cache_key,
+        cache_key=cache_key,
+        provider=provider.name,
+        model=provider.model,
+        output_artifact=str(paths.ir_semantic_json),
+        reason="reconciled decisions and BookState cache hit",
+    )
+    return SemanticStageResult(
+        bookir=semantic_ir,
+        outline=outline,
+        book_state=book_state,
+        audits=audits,
+        reviewed_blocks_count=len(raw_ir.blocks),
+        applied_changes_count=sum(1 for a in audits if a.status == "applied"),
+        preserved_originals_count=sum(1 for a in audits if "preserved" in a.status),
+        low_confidence_count=sum(
+            1 for a in audits if a.status == "preserved_original_low_confidence"
+        ),
+        conflict_count=sum(1 for a in audits if "conflict" in a.status),
+        struct_decisions=struct_decisions,
+        semantic_decisions=semantic_decisions,
+    )
 
 
 @dataclass
@@ -94,11 +227,41 @@ def run_semantic_reconstruction(
     if provider is None:
         provider = create_provider(cfg, purpose="semantic")
 
-    evidence_lookup = {b.block_id: b for b in evidence.blocks}
-
     paths.semantic_dir.mkdir(parents=True, exist_ok=True)
     paths.semantic_chunks_dir.mkdir(parents=True, exist_ok=True)
     paths.semantic_decisions_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_key = _semantic_cache_key(raw_ir, evidence, cfg, provider)
+    cache_dir = cfg.app.work_dir / "cache" / "semantic" / cache_key
+    cached_reconciled = cache_dir / "reconciled.json"
+    cached_state = cache_dir / "book_state.json"
+    if (
+        not cfg.app.force_semantic
+        and cached_reconciled.is_file()
+        and cached_state.is_file()
+    ):
+        return _materialize_cached_semantic_result(
+            raw_ir,
+            evidence,
+            cfg,
+            paths,
+            provider,
+            cache_key,
+            cached_reconciled,
+            cached_state,
+        )
+
+    record_stage_status(
+        paths.semantic_stage_json,
+        "semantic_structure",
+        StageState.RUNNING,
+        input_hash=cache_key,
+        cache_key=cache_key,
+        provider=provider.name,
+        model=provider.model,
+        reason="semantic reconstruction requested",
+    )
+    evidence_lookup = {b.block_id: b for b in evidence.blocks}
 
     # 1. Create Initial Dynamic Chunks
     chunks = create_semantic_chunks(
@@ -219,7 +382,16 @@ def run_semantic_reconstruction(
     pass_b_dir.mkdir(parents=True, exist_ok=True)
     pass_b_batches: list[SemanticDecisionBatch] = []
 
+    running_book_state = book_state
+    observation_dir = paths.semantic_dir / "book-state-observations"
+    observation_dir.mkdir(parents=True, exist_ok=True)
+
     for chunk in pass_b_chunks:
+        # The chunk list is deterministic, but BookState is intentionally dynamic:
+        # each request gets the state merged from all earlier chunks.
+        chunk = chunk.model_copy(
+            update={"book_state": get_book_state_prompt_view(running_book_state)}
+        )
         blocks_json = json.dumps([b.model_dump() for b in chunk.blocks], ensure_ascii=False)
         user_text = PASS_B_USER_PROMPT_TEMPLATE.format(
             chunk_id=chunk.chunk_id,
@@ -250,6 +422,31 @@ def run_semantic_reconstruction(
                     len(violations),
                 )
             batch_b = filter_out_of_scope_semantic_decisions(batch_b, chunk)
+            accepted_observations: list[BookStateObservationBatch] = []
+            for obs in batch_b.observations:
+                observation_violations = validate_book_state_observation_scope(obs, chunk)
+                if observation_violations:
+                    logger.warning(
+                        "Rejected BookState observations for chunk %s: %s",
+                        chunk.chunk_id,
+                        "; ".join(observation_violations),
+                    )
+                    continue
+                accepted_observations.append(obs)
+                running_book_state = merge_book_state_observations(
+                    running_book_state, obs, evidence_lookup
+                )
+            if accepted_observations:
+                observation_path = observation_dir / f"{chunk.chunk_id}.json"
+                observation_path.write_text(
+                    json.dumps(
+                        [obs.model_dump() for obs in accepted_observations],
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            batch_b = batch_b.model_copy(update={"observations": accepted_observations})
         except Exception as exc:
             logger.error(
                 "Pass B batch scope validation failed for chunk %s: %s. Skipping batch.",
@@ -306,6 +503,11 @@ def run_semantic_reconstruction(
 
     all_audits = pass_a_audits + pass_b_audits
 
+    book_state = running_book_state
+    paths.semantic_book_state_json.write_text(
+        book_state.model_dump_json(indent=2), encoding="utf-8"
+    )
+
     # Write provisional M8 audit artifact (before M9 visual arbitration updates it).
     # pipeline.py is responsible for writing the authoritative final applied.json
     # after M9 completes (either by updating it or by copying applied.m8.json if no M9).
@@ -317,6 +519,23 @@ def run_semantic_reconstruction(
     # M9-updated version if visual arbitration runs.
     paths.semantic_applied_json.write_text(
         json.dumps([a.model_dump() for a in all_audits], indent=2), encoding="utf-8"
+    )
+
+    # Cache only source-grounded decisions/state.  Re-materialization on a later
+    # run uses that run's raw IR and evidence, so cached paths never leak into it.
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(paths.semantic_decisions_dir / "reconciled.json", cached_reconciled)
+    shutil.copy2(paths.semantic_book_state_json, cached_state)
+    record_stage_status(
+        paths.semantic_stage_json,
+        "semantic_structure",
+        StageState.COMPLETE,
+        input_hash=cache_key,
+        cache_key=cache_key,
+        provider=provider.name,
+        model=provider.model,
+        output_artifact=str(paths.ir_semantic_json),
+        reason="semantic reconstruction complete",
     )
 
     applied_count = sum(1 for a in all_audits if a.status == "applied")

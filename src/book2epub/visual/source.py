@@ -68,7 +68,9 @@ class VisualSource:
         elif self.page_images:
             for p in self.page_images:
                 h.update(p.name.encode("utf-8"))
-                h.update(str(p.stat().st_size).encode("utf-8"))
+                # File size alone allows same-sized visual edits to reuse stale
+                # visual/OCR/presentation decisions.
+                h.update(p.read_bytes())
         else:
             h.update(b"none")
 

@@ -70,6 +70,12 @@ def create_semantic_chunks(
     """
     Partition SemanticDraftBook into dynamic, overlapping chunks according to
     M8 spec Section 4 and Appendix I5.
+
+    cfg.overlap_blocks controls context repetition between chunks (0 = no overlap).
+    Invariants:
+    - No infinite loop: next chunk always starts at least 1 block beyond previous start.
+    - No duplicate-only chunk: a chunk must contain at least 1 non-overlap block.
+    - overlap_blocks > max_chunk_blocks is clamped to max_chunk_blocks - 1.
     """
     all_blocks = draft_book.blocks
     if not all_blocks:
@@ -77,7 +83,8 @@ def create_semantic_chunks(
 
     max_chars = cfg.max_chunk_chars
     max_blocks = cfg.max_chunk_blocks
-    overlap_target = 8
+    # Clamp overlap_target: 0 ≤ overlap_target < max_blocks
+    overlap_target = max(0, min(cfg.overlap_blocks, max_blocks - 1))
 
     chunks: list[SemanticChunkInput] = []
     chunk_index = 0
@@ -108,10 +115,15 @@ def create_semantic_chunks(
         non_overlap_start = (
             curr_start_idx + overlap_target if chunk_index > 1 else curr_start_idx
         )
-        min_preferred_blocks = max_blocks // 2
+        min_preferred_blocks = max(1, max_blocks // 2)
 
-        if (end_idx - curr_start_idx) >= min_preferred_blocks and end_idx < total_blocks:
-            search_start = max(non_overlap_start, end_idx - 8)
+        boundary_search = max(0, overlap_target)
+        if (
+            boundary_search > 0
+            and (end_idx - curr_start_idx) >= min_preferred_blocks
+            and end_idx < total_blocks
+        ):
+            search_start = max(non_overlap_start, end_idx - boundary_search)
             for cand_idx in range(end_idx - 1, search_start - 1, -1):
                 cand_blk = all_blocks[cand_idx]
                 if (
@@ -124,11 +136,11 @@ def create_semantic_chunks(
         chunk_blocks = all_blocks[curr_start_idx:end_idx]
         block_ids = [b.block_id for b in chunk_blocks]
 
-        # Calculate overlap blocks
-        if chunk_index == 1:
+        # Calculate overlap blocks for display metadata (which blocks are repeated context)
+        if chunk_index == 1 or overlap_target == 0:
             overlap_ids = []
         else:
-            overlap_count = min(overlap_target, end_idx - curr_start_idx - 1)
+            overlap_count = min(overlap_target, len(chunk_blocks) - 1)
             overlap_ids = [b.block_id for b in chunk_blocks[:overlap_count]]
 
         chunk_id = compute_chunk_id(
@@ -143,6 +155,7 @@ def create_semantic_chunks(
             outline_items = get_outline_prompt_view(
                 outline=outline,
                 current_block_id=chunk_blocks[0].block_id,
+                ordered_block_ids=[b.block_id for b in all_blocks],
             )
 
         state_view: dict[str, Any] = {}
@@ -167,8 +180,15 @@ def create_semantic_chunks(
         if end_idx >= total_blocks:
             break
 
-        # Next chunk starts with final overlap_blocks of prior chunk
-        next_start = max(curr_start_idx + 1, end_idx - overlap_target)
+        # Next chunk starts with final overlap_target blocks of prior chunk.
+        # Invariant: next_start > curr_start_idx (no infinite loop).
+        # Invariant: next chunk has at least 1 non-overlap block (no duplicate-only chunk).
+        next_start = end_idx - overlap_target if overlap_target > 0 else end_idx
+        # Ensure forward progress: must advance at least 1 block past current start
+        next_start = max(next_start, curr_start_idx + 1)
+        # Ensure next chunk will have at least 1 non-overlap block
+        if next_start + overlap_target >= end_idx:
+            next_start = max(curr_start_idx + 1, end_idx - overlap_target)
         curr_start_idx = next_start
 
     return chunks
