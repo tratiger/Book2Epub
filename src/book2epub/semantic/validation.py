@@ -272,7 +272,6 @@ def validate_book_state_observation_scope(
         "heading_patterns",
         "preformatted_conventions",
         "callout_conventions",
-        "numbering_conventions",
     ):
         for item in getattr(observation, field_name):
             for block_id in item.example_block_ids:
@@ -281,6 +280,55 @@ def validate_book_state_observation_scope(
                         f"BookState observation {field_name} example_block_id={block_id!r} "
                         f"is not in chunk {chunk.chunk_id!r}"
                     )
+
+    # Numbering observations use source labels rather than example_block_ids.
+    # Validate both the block scope and the verbatim caption/label so a model
+    # cannot seed BookState with a plausible but hallucinated label.  The
+    # legacy example_labels field is accepted only when it matches a scoped
+    # source block; new responses should use the explicit examples field.
+    draft_by_id = {block.block_id: block for block in chunk.blocks}
+
+    def source_text_for_kind(block: object, kind: str) -> str:
+        current_kind = getattr(block, "current_kind", "")
+        kind_matches = {
+            "figure": current_kind == "figure",
+            "table": current_kind == "table",
+            "listing": current_kind in {"code", "preformatted"},
+            "example": current_kind == "example",
+            "exercise": current_kind == "exercise",
+        }
+        if not kind_matches.get(kind, False):
+            return ""
+        return str(
+            getattr(block, "caption_text", None)
+            or getattr(block, "caption_preview", None)
+            or ""
+        )
+
+    for item in observation.numbering_conventions:
+        for example in item.examples:
+            if example.block_id not in valid_ids:
+                violations.append(
+                    f"BookState observation numbering_conventions example block_id="
+                    f"{example.block_id!r} is not in chunk {chunk.chunk_id!r}"
+                )
+                continue
+            source_text = source_text_for_kind(draft_by_id.get(example.block_id), item.kind)
+            if not source_text or example.label not in source_text:
+                violations.append(
+                    f"BookState observation numbering_conventions label={example.label!r} "
+                    f"is not verbatim in source block {example.block_id!r}"
+                )
+
+        for label in item.example_labels:
+            if not any(
+                label in source_text_for_kind(block, item.kind)
+                for block in chunk.blocks
+            ):
+                violations.append(
+                    f"BookState observation numbering_conventions label={label!r} "
+                    f"is not verbatim in a scoped {item.kind} source block"
+                )
 
     for item in observation.domain_terms:
         if item.source_block_id not in valid_ids:

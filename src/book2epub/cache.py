@@ -7,6 +7,19 @@ from pathlib import Path
 from typing import Any
 
 
+def _without_job_paths(value: Any) -> Any:
+    """Return JSON data with per-run filesystem paths removed."""
+    if isinstance(value, dict):
+        return {
+            key: _without_job_paths(item)
+            for key, item in value.items()
+            if key not in {"source_path", "image_path"}
+        }
+    if isinstance(value, list):
+        return [_without_job_paths(item) for item in value]
+    return value
+
+
 def stable_hash(value: Any) -> str:
     """Hash JSON-compatible data with a stable UTF-8 representation."""
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -16,6 +29,19 @@ def stable_hash(value: Any) -> str:
 def hash_model(value: Any) -> str:
     """Hash a Pydantic model without depending on its pretty-print formatting."""
     return stable_hash(value.model_dump(mode="json"))
+
+
+def hash_model_without_job_paths(value: Any) -> str:
+    """Hash a model while ignoring paths that are regenerated for each job."""
+    return stable_hash(_without_job_paths(value.model_dump(mode="json")))
+
+
+def hash_bookir_relevant(bookir: Any) -> str:
+    """Hash BookIR content and asset identity without per-job asset paths."""
+    payload = bookir.model_dump(mode="json")
+    for asset in payload.get("assets", {}).values():
+        asset.pop("source_path", None)
+    return stable_hash(payload)
 
 
 def compute_semantic_cache_key(
@@ -92,12 +118,14 @@ def compute_ocr_cache_key(
     prompt: str,
     schema: dict[str, Any],
     policy_version: str,
+    ocr_recommendation_hash: str = "",
 ) -> str:
     return stable_hash(
         {
             "stage": "ocr_correction",
             "pre_ocr_ir_hash": pre_ocr_ir_hash,
             "candidate_old_hash": candidate_old_hash,
+            "ocr_recommendation_hash": ocr_recommendation_hash,
             "source_visual_hash": visual_hash,
             "mode": mode,
             "provider": provider,
@@ -142,3 +170,33 @@ def stage_cache_hit(stage_file: Path, cache_key: str, outputs: Iterable[Path]) -
     except (OSError, ValueError):
         return False
     return data.get("state") in {"complete", "cache_hit"} and data.get("cache_key") == cache_key
+
+
+def materialize_global_stage_cache(
+    work_dir: Path,
+    stage_name: str,
+    cache_key: str,
+    artifacts: dict[str, Path],
+) -> bool:
+    """Copy a complete run-independent stage cache into the current job."""
+    cache_dir = work_dir / "cache" / stage_name / cache_key
+    if any(not (cache_dir / name).is_file() for name in artifacts):
+        return False
+    for name, destination in artifacts.items():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((cache_dir / name).read_bytes())
+    return True
+
+
+def persist_global_stage_cache(
+    work_dir: Path,
+    stage_name: str,
+    cache_key: str,
+    artifacts: dict[str, Path],
+) -> None:
+    """Persist current-job stage artifacts under a stable global cache key."""
+    cache_dir = work_dir / "cache" / stage_name / cache_key
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for name, source in artifacts.items():
+        if source.is_file():
+            (cache_dir / name).write_bytes(source.read_bytes())

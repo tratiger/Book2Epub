@@ -1,5 +1,6 @@
 """Unit tests for full BookIR typography and whitespace normalization (M11)."""
 
+import hashlib
 from pathlib import Path
 
 from book2epub.ir.models import (
@@ -64,6 +65,38 @@ def test_typography_normalize_paragraph_reconstruction() -> None:
     assert norm_p.inlines[0].text == "これはLinux"
     assert report.source_segment_reconstructions == 1
     assert report.spaces_removed_vs_legacy_join == 1
+    norm_text = norm_p.inlines[0]
+    assert all(
+        segment.text_sha256 == hashlib.sha256(segment.text.encode("utf-8")).hexdigest()
+        for segment in norm_text.source_segments  # type: ignore[union-attr]
+    )
+
+
+def test_typography_updates_segment_hash_after_ideographic_space_removal() -> None:
+    text_inline = _make_text_with_segments(
+        old_joined="\u3000本文",
+        segments_texts=["\u3000本文"],
+        boundaries=["start"],
+    )
+    paragraph = Paragraph(id="p-indent-hash", inlines=[text_inline])
+    bookir = BookIR(
+        source=SourceDocument(page_count=1, pages=[SourcePage(page_idx=0, width=600, height=800)]),
+        blocks=[paragraph],
+    )
+    profile = DEFAULT_ENHANCED_PROFILE.model_copy(
+        update={
+            "body": DEFAULT_ENHANCED_PROFILE.body.model_copy(
+                update={"first_line_indent": "indent_1em"}
+            )
+        }
+    )
+
+    normalized, _ = typography_normalize_bookir(bookir, profile=profile)
+    result = normalized.blocks[0]
+    assert isinstance(result, Paragraph)
+    segment = result.inlines[0].source_segments[0]  # type: ignore[union-attr]
+    assert segment.text == "本文"
+    assert segment.text_sha256 == hashlib.sha256(segment.text.encode("utf-8")).hexdigest()
 
 
 def test_japanese_leading_print_indent_normalization() -> None:

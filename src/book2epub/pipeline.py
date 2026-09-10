@@ -10,7 +10,11 @@ from typing import Any
 from book2epub.cache import (
     compute_ocr_cache_key,
     compute_visual_cache_key,
+    hash_bookir_relevant,
     hash_model,
+    hash_model_without_job_paths,
+    materialize_global_stage_cache,
+    persist_global_stage_cache,
     stable_hash,
     stage_cache_hit,
 )
@@ -296,7 +300,7 @@ def run_conversion_m2(
                     semantic_decision_hash=stable_hash(
                         [a.model_dump() for a in semantic_result.audits]
                     ),
-                    evidence_hash=hash_model(evidence_book),
+                    evidence_hash=hash_model_without_job_paths(evidence_book),
                     visual_hash=visual_source.source_hash,
                     provider=vis_provider.name,
                     model=vis_provider.model,
@@ -312,9 +316,19 @@ def run_conversion_m2(
                     paths.semantic_visual_ir_json,
                     paths.semantic_visual_audits_json,
                 )
-                if not cfg.app.force_visual and stage_cache_hit(
-                    paths.semantic_visual_stage_json, visual_key, visual_outputs
-                ):
+                visual_cache_artifacts = {
+                    "stage.json": paths.semantic_visual_stage_json,
+                    "bookir.json": paths.semantic_visual_ir_json,
+                    "audits.json": paths.semantic_visual_audits_json,
+                }
+                visual_cache_hit = False
+                if not cfg.app.force_visual:
+                    visual_cache_hit = materialize_global_stage_cache(
+                        cfg.app.work_dir, "visual", visual_key, visual_cache_artifacts
+                    ) or stage_cache_hit(
+                        paths.semantic_visual_stage_json, visual_key, visual_outputs
+                    )
+                if visual_cache_hit:
                     semantic_ir = load_bookir(paths.semantic_visual_ir_json)
                     visual_payload = json.loads(
                         paths.semantic_visual_audits_json.read_text(encoding="utf-8")
@@ -338,6 +352,9 @@ def run_conversion_m2(
                         model=vis_provider.model,
                         output_artifact=str(paths.semantic_visual_ir_json),
                         reason="visual arbitration cache hit",
+                    )
+                    persist_global_stage_cache(
+                        cfg.app.work_dir, "visual", visual_key, visual_cache_artifacts
                     )
                 else:
                     record_stage_status(
@@ -389,6 +406,9 @@ def run_conversion_m2(
                         model=vis_provider.model,
                         output_artifact=str(paths.semantic_visual_ir_json),
                         reason="visual arbitration complete",
+                    )
+                    persist_global_stage_cache(
+                        cfg.app.work_dir, "visual", visual_key, visual_cache_artifacts
                     )
                 save_bookir(semantic_ir, paths.ir_semantic_json)
                 # Write authoritative final audit artifact (M9-updated).
@@ -446,7 +466,7 @@ def run_conversion_m2(
             ]
         )
         ocr_key = compute_ocr_cache_key(
-            pre_ocr_ir_hash=hash_model(semantic_ir),
+            pre_ocr_ir_hash=hash_bookir_relevant(semantic_ir),
             candidate_old_hash=candidate_old_hash,
             visual_hash=visual_source.source_hash,
             mode=cfg.ocr_correction.mode,
@@ -455,12 +475,23 @@ def run_conversion_m2(
             prompt=OCR_PROPOSAL_SYSTEM_INSTRUCTION + OCR_PROPOSAL_USER_PROMPT,
             schema=build_provider_schema(OCRCorrectionBatch),
             policy_version="M9-ocr-policy-1.0",
+            ocr_recommendation_hash=stable_hash(sorted(ocr_recommended_block_ids)),
         )
-        if not cfg.app.force_visual and stage_cache_hit(
-            paths.semantic_ocr_stage_json,
-            ocr_key,
-            (paths.ir_corrected_json, paths.semantic_ocr_corrections_json),
-        ):
+        ocr_cache_artifacts = {
+            "stage.json": paths.semantic_ocr_stage_json,
+            "bookir.corrected.json": paths.ir_corrected_json,
+            "ocr-corrections.json": paths.semantic_ocr_corrections_json,
+        }
+        ocr_cache_hit = False
+        if not cfg.app.force_visual:
+            ocr_cache_hit = materialize_global_stage_cache(
+                cfg.app.work_dir, "ocr", ocr_key, ocr_cache_artifacts
+            ) or stage_cache_hit(
+                paths.semantic_ocr_stage_json,
+                ocr_key,
+                (paths.ir_corrected_json, paths.semantic_ocr_corrections_json),
+            )
+        if ocr_cache_hit:
             corrected_ir = load_bookir(paths.ir_corrected_json)
             record_stage_status(
                 paths.semantic_ocr_stage_json,
@@ -472,6 +503,9 @@ def run_conversion_m2(
                 model=ocr_provider.model,
                 output_artifact=str(paths.ir_corrected_json),
                 reason="OCR correction cache hit",
+            )
+            persist_global_stage_cache(
+                cfg.app.work_dir, "ocr", ocr_key, ocr_cache_artifacts
             )
         else:
             record_stage_status(
@@ -503,6 +537,9 @@ def run_conversion_m2(
                 model=ocr_provider.model,
                 output_artifact=str(paths.ir_corrected_json),
                 reason="OCR correction complete",
+            )
+            persist_global_stage_cache(
+                cfg.app.work_dir, "ocr", ocr_key, ocr_cache_artifacts
             )
     else:
         corrected_ir = semantic_ir

@@ -56,6 +56,27 @@ def test_chunking_exceeds_max_blocks() -> None:
     assert len(chunks[1].overlap_block_ids) > 0
 
 
+def test_chunking_respects_zero_overlap_and_clamps_large_overlap() -> None:
+    blocks = [_make_dummy_block(f"b{i}") for i in range(7)]
+    draft = SemanticDraftBook(book_id="overlap", blocks=blocks)
+
+    no_overlap = create_semantic_chunks(
+        draft,
+        SemanticConfig(max_chunk_blocks=3, max_chunk_chars=50000, overlap_blocks=0),
+    )
+    assert all(chunk.overlap_block_ids == [] for chunk in no_overlap)
+
+    oversized_overlap = create_semantic_chunks(
+        draft,
+        SemanticConfig(max_chunk_blocks=3, max_chunk_chars=50000, overlap_blocks=99),
+    )
+    assert len(oversized_overlap) < 10
+    assert all(
+        len(chunk.block_ids) > len(chunk.overlap_block_ids)
+        for chunk in oversized_overlap
+    )
+
+
 def test_chunking_heading_boundary_split() -> None:
     # 20 blocks where block 14 is a heading
     blocks: list[DraftBlock] = []

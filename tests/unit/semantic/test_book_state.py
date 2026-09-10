@@ -1,12 +1,23 @@
 """Unit tests for BookState deterministic initialization, observation merging,
 and hard limits (Appendix J)."""
 
-from book2epub.ir.models import CodeBlock, Heading, Paragraph, Text
+from book2epub.ir.models import (
+    CodeBlock,
+    ExampleBlock,
+    ExerciseBlock,
+    Figure,
+    Heading,
+    Paragraph,
+    Table,
+    Text,
+)
 from book2epub.semantic.book_state import (
     BookState,
     BookStateObservationBatch,
     DomainTermObservation,
     HeadingPatternObservation,
+    NumberingConventionExample,
+    NumberingConventionObservation,
     PreformattedConventionObservation,
     compute_initial_book_state,
     get_book_state_prompt_view,
@@ -28,6 +39,23 @@ def test_compute_initial_book_state() -> None:
     assert "sql" in state.confirmed_code_languages
     assert any(hp.numbering_family == "chapter_japanese" for hp in state.heading_patterns)
     assert any(hp.numbering_family == "decimal" for hp in state.heading_patterns)
+
+
+def test_compute_initial_book_state_records_source_numbering_verbatim() -> None:
+    state = compute_initial_book_state(
+        [
+            Figure(id="fig-1", asset_id="a", caption=[Text(text="図1.3 構成")]),
+            Table(id="tbl-1", html="<table/>", caption=[Text(text="表2-5 結果")]),
+            ExampleBlock(id="ex-1", label=[Text(text="例4")]),
+            ExerciseBlock(id="exercise-1", label=[Text(text="練習III")]),
+        ]
+    )
+
+    labels = {(item.kind, item.family): item.example_labels for item in state.numbering_conventions}
+    assert labels[("figure", "chapter-dot")] == ["図1.3 構成"]
+    assert labels[("table", "chapter-hyphen")] == ["表2-5 結果"]
+    assert labels[("example", "global")] == ["例4"]
+    assert labels[("exercise", "roman")] == ["練習III"]
 
 
 def test_merge_book_state_verbatim_domain_term() -> None:
@@ -56,6 +84,33 @@ def test_merge_book_state_verbatim_domain_term() -> None:
     assert any(dt.normalized_key == "fork()" for dt in merged.domain_terms)
     # quantum_hypervisor must be discarded because it's not present verbatim in b1
     assert not any(dt.normalized_key == "quantum_hypervisor" for dt in merged.domain_terms)
+
+
+def test_merge_book_state_numbering_requires_verbatim_source_label() -> None:
+    state = BookState(schema_version="1.0")
+    evidence_lookup = {
+        "fig-1": SemanticEvidenceBlock(
+            block_id="fig-1",
+            current_kind="figure",
+            caption_text="図1.3 構成",
+            plain_text="図1.3 構成",
+        )
+    }
+    obs_batch = BookStateObservationBatch(
+        chunk_id="chk-1",
+        numbering_conventions=[
+            NumberingConventionObservation(
+                kind="figure",
+                family="chapter-dot",
+                examples=[NumberingConventionExample(block_id="fig-1", label="図1.3")],
+                example_labels=["図9.9"],
+                confidence=0.9,
+            )
+        ],
+    )
+
+    merged = merge_book_state_observations(state, obs_batch, evidence_lookup)
+    assert merged.numbering_conventions[0].example_labels == ["図1.3"]
 
 
 def test_merge_book_state_conventions_and_limits() -> None:

@@ -149,11 +149,23 @@ class CalloutConventionObservation(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
 
 
+class NumberingConventionExample(BaseModel):
+    """Source-grounded numbering example returned by the provider."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    block_id: str
+    label: str = Field(min_length=1)
+
+
 class NumberingConventionObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["figure", "table", "listing", "example", "exercise"]
     family: Literal["chapter-hyphen", "chapter-dot", "global", "roman", "other"]
+    examples: list[NumberingConventionExample] = Field(default_factory=list)
+    # Kept for backward-compatible provider fixtures. Runtime validation only
+    # accepts labels that can be matched verbatim to a scoped source block.
     example_labels: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
 
@@ -186,13 +198,13 @@ def detect_numbering_family(
     text: str,
 ) -> tuple[str, Literal["chapter-hyphen", "chapter-dot", "global", "roman", "other"]]:
     """Detect numbering family from label text (e.g. '1-2', '3.4', '15')."""
-    if re.search(r"\b\d+-\d+\b", text):
+    if re.search(r"(?<!\d)\d+-\d+(?!\d)", text):
         return text, "chapter-hyphen"
-    if re.search(r"\b\d+\.\d+\b", text):
+    if re.search(r"(?<!\d)\d+\.\d+(?!\d)", text):
         return text, "chapter-dot"
-    if re.search(r"\b\d+\b", text):
+    if re.search(r"(?<!\d)\d+(?!\d)", text):
         return text, "global"
-    if re.search(r"\b[IVXLCDM]+\b", text):
+    if re.search(r"(?<![A-Za-z])[IVXLCDM]+(?![A-Za-z])", text, re.IGNORECASE):
         return text, "roman"
     return text, "other"
 
@@ -346,6 +358,50 @@ def merge_book_state_observations(
             return ids[:8]
         return [block_id for block_id in ids if block_id in known_block_ids][:8]
 
+    def source_grounded_numbering_labels(num_obs: NumberingConventionObservation) -> list[str]:
+        labels_by_block = {example.block_id: example.label for example in num_obs.examples}
+        labels = list(labels_by_block.values()) + list(num_obs.example_labels)
+        if not known_block_ids:
+            return labels[:8]
+
+        kind_aliases = {
+            "figure": {"figure"},
+            "table": {"table"},
+            "listing": {"code", "preformatted"},
+            "example": {"example"},
+            "exercise": {"exercise"},
+        }
+        allowed_kinds = kind_aliases[num_obs.kind]
+        grounded: list[str] = []
+        for label in labels:
+            explicit_example = next(
+                (example for example in num_obs.examples if example.label == label),
+                None,
+            )
+            matching_blocks = (
+                [evidence_lookup.get(explicit_example.block_id)]
+                if explicit_example is not None
+                else list(evidence_lookup.values())
+            )
+            if any(
+                evidence is not None
+                and evidence.current_kind in allowed_kinds
+                and label
+                in " ".join(
+                    part
+                    for part in (
+                        evidence.plain_text,
+                        evidence.caption_text,
+                        evidence.caption_plain_text,
+                    )
+                    if part
+                )
+                for evidence in matching_blocks
+            ):
+                if label not in grounded:
+                    grounded.append(label)
+        return grounded[:8]
+
     # 1. Merge heading patterns (merge on family + likely_level)
     for hp_obs in obs.heading_patterns:
         existing = next(
@@ -438,6 +494,7 @@ def merge_book_state_observations(
     # 4. Merge numbering conventions on kind + family. Labels are kept exactly
     # as supplied by source evidence; no numbering is generated here.
     for num_obs in obs.numbering_conventions:
+        labels = source_grounded_numbering_labels(num_obs)
         existing_num = next(
             (
                 item
@@ -450,7 +507,7 @@ def merge_book_state_observations(
             existing_num.confidence = round(
                 (existing_num.confidence + num_obs.confidence) / 2.0, 3
             )
-            for label in num_obs.example_labels:
+            for label in labels:
                 if (
                     label not in existing_num.example_labels
                     and len(existing_num.example_labels) < 8
@@ -461,7 +518,7 @@ def merge_book_state_observations(
                 NumberingConvention(
                     kind=num_obs.kind,
                     family=num_obs.family,
-                    example_labels=num_obs.example_labels[:8],
+                    example_labels=labels[:8],
                     confidence=num_obs.confidence,
                 )
             )

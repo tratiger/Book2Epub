@@ -85,8 +85,10 @@ and Japanese equivalents are strong evidence but must agree with the block conte
 
 Alongside decisions, return at most one bounded `observations` object. Set its
 `chunk_id` to this exact CHUNK_ID. Include only source-grounded recurring
-conventions and exact domain spellings supported by the supplied block IDs;
-never include model rationale as an observation.
+conventions and exact domain spellings supported by the supplied block IDs.
+For numbering conventions, use `examples` with an exact in-chunk block_id and
+verbatim caption/label; never invent, normalize, or paraphrase labels. Never
+include model rationale as an observation.
 
 BOOK_STATE:
 {book_state_json}

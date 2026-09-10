@@ -5,7 +5,10 @@ import logging
 
 from book2epub.cache import (
     compute_presentation_cache_key,
+    hash_bookir_relevant,
     hash_model,
+    materialize_global_stage_cache,
+    persist_global_stage_cache,
     stage_cache_hit,
 )
 from book2epub.config import JobConfig
@@ -91,17 +94,29 @@ def resolve_style_profile(
         presentation_key = compute_presentation_cache_key(
             representative_pages=rep_pages,
             visual_hash=visual_source.source_hash,
-            relevant_ir_hash=hash_model(bookir),
+            relevant_ir_hash=hash_bookir_relevant(bookir),
             provider=provider_name,
             model=provider_model,
             profile_schema=build_provider_schema(BookStyleProfileDecision),
             prompt=STYLE_INFERENCE_SYSTEM_INSTRUCTION + STYLE_INFERENCE_USER_PROMPT,
         )
-        if not cfg.app.force_presentation and stage_cache_hit(
-            paths.presentation_stage_json,
-            presentation_key,
-            (paths.presentation_book_style_profile_json,),
-        ):
+        presentation_cache_artifacts = {
+            "stage.json": paths.presentation_stage_json,
+            "book-style-profile.json": paths.presentation_book_style_profile_json,
+        }
+        presentation_cache_hit = False
+        if not cfg.app.force_presentation:
+            presentation_cache_hit = materialize_global_stage_cache(
+                cfg.app.work_dir,
+                "presentation",
+                presentation_key,
+                presentation_cache_artifacts,
+            ) or stage_cache_hit(
+                paths.presentation_stage_json,
+                presentation_key,
+                (paths.presentation_book_style_profile_json,),
+            )
+        if presentation_cache_hit:
             profile = BookStyleProfile.model_validate_json(
                 paths.presentation_book_style_profile_json.read_text(encoding="utf-8")
             )
@@ -115,6 +130,12 @@ def resolve_style_profile(
                 model=provider_model or None,
                 output_artifact=str(paths.presentation_book_style_profile_json),
                 reason="presentation profile cache hit",
+            )
+            persist_global_stage_cache(
+                cfg.app.work_dir,
+                "presentation",
+                presentation_key,
+                presentation_cache_artifacts,
             )
             return profile, []
 
@@ -174,6 +195,12 @@ def resolve_style_profile(
             model=provider_model or None,
             output_artifact=str(paths.presentation_book_style_profile_json),
             reason="presentation profile complete",
+        )
+        persist_global_stage_cache(
+            cfg.app.work_dir,
+            "presentation",
+            presentation_key,
+            presentation_cache_artifacts,
         )
         return profile, warnings
 

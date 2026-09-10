@@ -9,6 +9,11 @@ Tests M: related_block_ids scope validation & sanitization
 
 import pytest
 
+from book2epub.semantic.book_state import (
+    BookStateObservationBatch,
+    NumberingConventionExample,
+    NumberingConventionObservation,
+)
 from book2epub.semantic.chunking import SemanticChunkInput
 from book2epub.semantic.decisions import SemanticDecision, SemanticDecisionBatch
 from book2epub.semantic.models import DraftBlock
@@ -17,6 +22,7 @@ from book2epub.semantic.validation import (
     ScopeValidationError,
     filter_out_of_scope_semantic_decisions,
     filter_out_of_scope_structure_decisions,
+    validate_book_state_observation_scope,
     validate_semantic_batch_scope,
     validate_structure_batch_scope,
 )
@@ -39,6 +45,82 @@ def _make_chunk(chunk_id: str, block_ids: list[str]) -> SemanticChunkInput:
         blocks=[_make_draft_block(bid) for bid in block_ids],
         overlap_block_ids=[],
     )
+
+
+def test_numbering_observation_is_scoped_and_does_not_drop_decisions() -> None:
+    chunk = SemanticChunkInput(
+        chunk_id="sem-numbering",
+        block_ids=["fig-1"],
+        blocks=[
+            DraftBlock(
+                block_id="fig-1",
+                current_kind="figure",
+                caption_text="図1.3 構成",
+                text_preview="figure",
+            )
+        ],
+    )
+    batch = SemanticDecisionBatch(
+        chunk_id=chunk.chunk_id,
+        decisions=[
+            SemanticDecision(
+                block_id="fig-1",
+                target="figure",
+                confidence=0.9,
+                evidence_codes=[],
+            )
+        ],
+        observations=[
+            BookStateObservationBatch(
+                chunk_id=chunk.chunk_id,
+                numbering_conventions=[
+                    NumberingConventionObservation(
+                        kind="figure",
+                        family="chapter-dot",
+                        examples=[
+                            NumberingConventionExample(block_id="fig-1", label="図1.3")
+                        ],
+                        confidence=0.9,
+                    )
+                ],
+            )
+        ],
+    )
+
+    assert validate_book_state_observation_scope(batch.observations[0], chunk) == []
+    filtered = filter_out_of_scope_semantic_decisions(batch, chunk)
+    assert len(filtered.decisions) == 1
+    assert len(filtered.observations) == 1
+
+
+def test_numbering_observation_rejects_bad_block_and_hallucinated_label() -> None:
+    chunk = SemanticChunkInput(
+        chunk_id="sem-numbering-bad",
+        block_ids=["fig-1"],
+        blocks=[
+            DraftBlock(
+                block_id="fig-1",
+                current_kind="figure",
+                caption_text="図1.3 構成",
+            )
+        ],
+    )
+    observation = BookStateObservationBatch(
+        chunk_id=chunk.chunk_id,
+        numbering_conventions=[
+            NumberingConventionObservation(
+                kind="figure",
+                family="chapter-dot",
+                        examples=[NumberingConventionExample(block_id="ghost", label="図9.9")],
+                        example_labels=["図8.8"],
+                        confidence=0.9,
+            )
+        ],
+    )
+
+    violations = validate_book_state_observation_scope(observation, chunk)
+    assert any("ghost" in violation for violation in violations)
+    assert any("図8.8" in violation for violation in violations)
 
 
 # ---------------------------------------------------------------------------
