@@ -375,6 +375,7 @@ def run_conversion_m3(
         profile=profile,
     )
     result = renderer.render(render_ir)
+    result.rendered_ir = render_ir
     logger.info(
         "=== Milestone M3 Complete: %d XHTML parts, %d math, %d figures, %d tables ===",
         result.xhtml_part_count,
@@ -440,13 +441,17 @@ def run_conversion_m5(
         raw_middle_data = json.load(f)
 
     # Use final rendered typography-normalized BookIR when available
-    if paths.ir_typography_json.is_file():
+    if render_result.rendered_ir is not None:
+        book_ir = render_result.rendered_ir
+    elif paths.ir_typography_json.is_file():
         try:
             from book2epub.ir.serializer import load_bookir
 
             book_ir = load_bookir(paths.ir_typography_json)
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load typography-normalized BookIR from {paths.ir_typography_json}: {e}"
+            ) from e
 
     evidence = None
     if paths.semantic_evidence_json.is_file():
@@ -515,7 +520,9 @@ def run_conversion_m5(
     preservation_ledger = build_preservation_ledger(
         evidence, book_ir, audits, ocr_audits=ocr_audits
     )
-    preservation_violations = evaluate_preservation_qa(preservation_ledger, evidence, book_ir)
+    preservation_violations = evaluate_preservation_qa(
+        preservation_ledger, evidence, book_ir, ocr_audits=ocr_audits
+    )
     semantic_metrics = evaluate_semantic_transitions(evidence, book_ir, audits, outline=outline)
     ocr_metrics, ocr_warns = evaluate_ocr_qa(
         paths.semantic_ocr_corrections_json, cfg.ocr_correction.mode
@@ -619,7 +626,7 @@ def run_pipeline(
         run_conversion_m5(
             paths=paths,
             raw_middle_path=canonical_middle,
-            book_ir=normalized_ir,
+            book_ir=render_result.rendered_ir or normalized_ir,
             render_result=render_result,
             packaging_result=packaging_result,
             cfg=cfg,
@@ -669,7 +676,7 @@ def run_from_middle(
         run_conversion_m5(
             paths=paths,
             raw_middle_path=canonical_middle,
-            book_ir=normalized_ir,
+            book_ir=render_result.rendered_ir or normalized_ir,
             render_result=render_result,
             packaging_result=packaging_result,
             cfg=cfg,

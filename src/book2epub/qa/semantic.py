@@ -43,8 +43,10 @@ from book2epub.semantic.decisions import SemanticAuditRecord
 from book2epub.semantic.hashing import compute_content_sha256, compute_text_sha256
 from book2epub.semantic.models import SemanticEvidenceBook
 from book2epub.semantic.structure import BookOutline
+from book2epub.typography import reconstruct_text_from_source_segments
 from book2epub.typography.japanese import classify_char
 from book2epub.typography.models import CharClass
+from book2epub.visual.models import OCRAuditRecord
 
 logger = logging.getLogger(__name__)
 
@@ -287,17 +289,25 @@ def build_preservation_ledger(
                     else:
                         has_applied_ocr = False
                         if ev.source_segments:
-                            seg_texts: list[str] = []
+                            eff_segments = []
                             for seg in ev.source_segments:
                                 if (ev.block_id, seg.segment_id) in applied_ocr_by_seg:
-                                    seg_texts.append(
-                                        applied_ocr_by_seg[(ev.block_id, seg.segment_id)]
+                                    eff_segments.append(
+                                        seg.model_copy(
+                                            update={
+                                                "text": applied_ocr_by_seg[
+                                                    (ev.block_id, seg.segment_id)
+                                                ]
+                                            }
+                                        )
                                     )
                                     has_applied_ocr = True
                                 else:
-                                    seg_texts.append(seg.text)
+                                    eff_segments.append(seg)
                             if has_applied_ocr:
-                                expected_text = "".join(seg_texts)
+                                expected_text = reconstruct_text_from_source_segments(
+                                    eff_segments, block_id=ev.block_id
+                                )
                             else:
                                 expected_text = ev.plain_text or ev.preformatted_text or ""
                         else:
@@ -311,14 +321,27 @@ def build_preservation_ledger(
                             else:
                                 expected_text = ev.plain_text or ev.preformatted_text or ""
 
-                    if expected_text and compute_text_sha256(final_text) != compute_text_sha256(
-                        expected_text
-                    ):
-                        if not is_acceptable_text_preservation(expected_text, final_text):
+                    is_code_like = (
+                        ev.source_type in ("code", "algorithm", "preformatted")
+                        or final_kind in ("code", "preformatted")
+                    )
+                    if is_code_like:
+                        norm_exp = expected_text.replace("\r\n", "\n")
+                        norm_fin = final_text.replace("\r\n", "\n")
+                        if norm_exp != norm_fin:
                             reason = (
                                 f"Text mismatch in same-representation block: "
                                 f"source '{expected_text[:30]}' != final '{final_text[:30]}'"
                             )
+                    else:
+                        if expected_text and compute_text_sha256(final_text) != compute_text_sha256(
+                            expected_text
+                        ):
+                            if not is_acceptable_text_preservation(expected_text, final_text):
+                                reason = (
+                                    f"Text mismatch in same-representation block: "
+                                    f"source '{expected_text[:30]}' != final '{final_text[:30]}'"
+                                )
                 elif ev.source_type == "table" and final_kind in ("preformatted", "code"):
                     # Table -> terminal/code justified representation change
                     ev_pre = ev.preformatted_text or ""
@@ -436,7 +459,17 @@ def build_preservation_ledger(
                 # 3. Trace semantic supersession (e.g. table fallback image -> HTML table)
                 # Restrict to same-source relations: explicit audit retype, or fallback asset ID
                 # matched by specific Table
-                matching_table = None
+                matching_replacement: Block | None = None
+                if ev.source_type in ("table_fallback", "image"):
+                    for b, _ in flat_blocks:
+                        if isinstance(b, Table):
+                            if b.fallback_asset_id and (
+                                b.fallback_asset_id in ev.asset_ids
+                                or b.fallback_asset_id == ev.block_id
+                            ):
+                                matching_replacement = b
+                                break
+
                 applied_table_retype = any(
                     a.status == "applied"
                     and (
@@ -445,31 +478,29 @@ def build_preservation_ledger(
                     )
                     for a in audits_by_block.get(ev.block_id, [])
                 )
-                if ev.source_type in ("table_fallback", "image"):
+                if matching_replacement is None and applied_table_retype:
+                    # Look for resolved replacement block in flat_blocks
                     for b, _ in flat_blocks:
-                        if isinstance(b, Table):
-                            if b.fallback_asset_id and (
-                                b.fallback_asset_id in ev.asset_ids
-                                or b.fallback_asset_id == ev.block_id
-                            ):
-                                matching_table = b
-                                break
+                        if any(
+                            getattr(s, "block_id", "") == ev.block_id
+                            for s in getattr(b, "sources", [])
+                        ):
+                            matching_replacement = b
+                            break
 
-                if applied_table_retype or (
-                    matching_table is not None and ev.source_type in ("table_fallback", "image")
-                ):
+                if matching_replacement is not None:
                     disposition = DispositionStr("semantically_superseded")
                     reason = (
-                        "Source representation superseded by structured semantic equivalent"
-                        + (f" '{matching_table.id}'" if matching_table else "")
+                        f"Source representation superseded by structured semantic equivalent "
+                        f"'{matching_replacement.id}'"
                     )
                     ledger.append(
                         PreservationLedgerEntry(
                             source_block_id=ev.block_id,
                             source_kind=ev.source_type,
                             source_content_sha256=ev.content_sha256,
-                            final_block_ids=[matching_table.id] if matching_table else [],
-                            final_kinds=[matching_table.kind] if matching_table else ["table"],
+                            final_block_ids=[matching_replacement.id],
+                            final_kinds=[matching_replacement.kind],
                             final_content_sha256s=[],
                             disposition=disposition,
                             source_asset_ids=ev.asset_ids,
@@ -532,11 +563,12 @@ def evaluate_preservation_qa(
     ledger: list[PreservationLedgerEntry],
     evidence: SemanticEvidenceBook | None,
     bookir: BookIR,
+    ocr_audits: list[OCRAuditRecord] | None = None,
 ) -> list[QAViolation]:
     """
     Assert preservation invariants across ledger entries (Appendix N2).
     Checks for content loss, fabricated text, unexplained asset loss,
-    footnote loss, and caption loss.
+    footnote loss, caption loss, and footnote/caption corruption.
     """
     violations: list[QAViolation] = []
     evidence_lookup = {b.block_id: b for b in evidence.blocks} if evidence else {}
@@ -544,6 +576,12 @@ def evaluate_preservation_qa(
     final_blocks_by_id: dict[str, tuple[Block, str | None]] = {
         b.id: (b, pid) for b, pid in flat_blocks
     }
+
+    applied_ocr: dict[tuple[str, str], str] = {}
+    if ocr_audits:
+        for a in ocr_audits:
+            if a.status == "applied":
+                applied_ocr[(a.block_id, a.segment_id)] = a.new_text
 
     for entry in ledger:
         # 1. Content Loss
@@ -600,32 +638,50 @@ def evaluate_preservation_qa(
                 )
             )
 
-        # 4. Footnote loss (per-block)
+        # 4. Footnote loss & corruption (per-block)
         ev = evidence_lookup.get(entry.source_block_id)
         if ev and (ev.footnote_text or ev.footnote_plain_text):
-            final_has_fn = False
+            expected_fn = ev.footnote_plain_text or ev.footnote_text or ""
+            if ev.source_segments:
+                fn_segs = [
+                    s
+                    for s in ev.source_segments
+                    if s.source_span_type == "footnote" or "fn" in s.segment_id.lower()
+                ]
+                if fn_segs:
+                    eff_fn_segs = [
+                        s.model_copy(update={"text": applied_ocr[(ev.block_id, s.segment_id)]})
+                        if (ev.block_id, s.segment_id) in applied_ocr
+                        else s
+                        for s in fn_segs
+                    ]
+                    expected_fn = reconstruct_text_from_source_segments(
+                        eff_fn_segs, block_id=ev.block_id
+                    )
+
+            final_fn_block: Footnote | None = None
+            final_fn_container: Block | None = None
             for bid in entry.final_block_ids:
                 fb_entry = final_blocks_by_id.get(bid)
                 if fb_entry:
                     fb, _ = fb_entry
-                    if isinstance(fb, Footnote) and extract_inlines_text(fb.inlines).strip():
-                        final_has_fn = True
+                    if isinstance(fb, Footnote):
+                        final_fn_block = fb
                         break
-                    if getattr(fb, "footnotes", None) and extract_inlines_text(
-                        getattr(fb, "footnotes")
-                    ).strip():
-                        final_has_fn = True
+                    if getattr(fb, "footnotes", None):
+                        final_fn_container = fb
                         break
-            if not final_has_fn:
+            if final_fn_block is None and final_fn_container is None:
                 for b, _ in flat_blocks:
                     if isinstance(b, Footnote):
                         if b.id == entry.source_block_id or any(
                             getattr(s, "block_id", "") == entry.source_block_id
                             for s in getattr(b, "sources", [])
                         ):
-                            final_has_fn = True
+                            final_fn_block = b
                             break
-            if not final_has_fn:
+
+            if final_fn_block is None and final_fn_container is None:
                 violations.append(
                     QAViolation(
                         category="preservation",
@@ -635,20 +691,76 @@ def evaluate_preservation_qa(
                         block_id=entry.source_block_id,
                     )
                 )
+            else:
+                actual_fn_text = ""
+                if final_fn_block:
+                    actual_fn_text = extract_inlines_text(final_fn_block.inlines)
+                elif final_fn_container:
+                    actual_fn_text = extract_inlines_text(getattr(final_fn_container, "footnotes"))
 
-        # 5. Caption loss (per-block)
+                if not actual_fn_text.strip():
+                    violations.append(
+                        QAViolation(
+                            category="preservation",
+                            severity="error",
+                            code="FOOTNOTE_LOSS",
+                            message=f"Footnote text for block '{entry.source_block_id}' was empty",
+                            block_id=entry.source_block_id,
+                        )
+                    )
+                elif not is_acceptable_text_preservation(expected_fn, actual_fn_text):
+                    violations.append(
+                        QAViolation(
+                            category="preservation",
+                            severity="error",
+                            code="FOOTNOTE_CORRUPTION",
+                            message=(
+                                f"Footnote content corrupted for block '{entry.source_block_id}': "
+                                f"expected '{expected_fn[:30]}', got '{actual_fn_text[:30]}'"
+                            ),
+                            block_id=entry.source_block_id,
+                        )
+                    )
+
+        # 5. Caption loss & corruption (per-block)
         if ev and (ev.caption_text or ev.caption_plain_text):
-            final_has_cap = False
+            expected_cap = ev.caption_plain_text or ev.caption_text or ""
+            if ev.source_segments:
+                cap_segs = [
+                    s
+                    for s in ev.source_segments
+                    if s.source_span_type == "caption" or "caption" in s.segment_id.lower()
+                ]
+                if cap_segs:
+                    eff_cap_segs = [
+                        s.model_copy(update={"text": applied_ocr[(ev.block_id, s.segment_id)]})
+                        if (ev.block_id, s.segment_id) in applied_ocr
+                        else s
+                        for s in cap_segs
+                    ]
+                    expected_cap = reconstruct_text_from_source_segments(
+                        eff_cap_segs, block_id=ev.block_id
+                    )
+
+            final_cap_block: Block | None = None
             for bid in entry.final_block_ids:
                 fb_entry = final_blocks_by_id.get(bid)
                 if fb_entry:
                     fb, _ = fb_entry
-                    if getattr(fb, "caption", None) and extract_inlines_text(
-                        getattr(fb, "caption")
-                    ).strip():
-                        final_has_cap = True
+                    if getattr(fb, "caption", None):
+                        final_cap_block = fb
                         break
-            if not final_has_cap:
+            if final_cap_block is None:
+                for b, _ in flat_blocks:
+                    if getattr(b, "caption", None):
+                        if b.id == entry.source_block_id or any(
+                            getattr(s, "block_id", "") == entry.source_block_id
+                            for s in getattr(b, "sources", [])
+                        ):
+                            final_cap_block = b
+                            break
+
+            if final_cap_block is None:
                 violations.append(
                     QAViolation(
                         category="preservation",
@@ -658,6 +770,31 @@ def evaluate_preservation_qa(
                         block_id=entry.source_block_id,
                     )
                 )
+            else:
+                actual_cap_text = extract_inlines_text(getattr(final_cap_block, "caption"))
+                if not actual_cap_text.strip():
+                    violations.append(
+                        QAViolation(
+                            category="preservation",
+                            severity="error",
+                            code="CAPTION_LOSS",
+                            message=f"Caption text for block '{entry.source_block_id}' was empty",
+                            block_id=entry.source_block_id,
+                        )
+                    )
+                elif not is_acceptable_text_preservation(expected_cap, actual_cap_text):
+                    violations.append(
+                        QAViolation(
+                            category="preservation",
+                            severity="error",
+                            code="CAPTION_CORRUPTION",
+                            message=(
+                                f"Caption content corrupted for block '{entry.source_block_id}': "
+                                f"expected '{expected_cap[:30]}', got '{actual_cap_text[:30]}'"
+                            ),
+                            block_id=entry.source_block_id,
+                        )
+                    )
 
     return violations
 

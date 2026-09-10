@@ -2,7 +2,10 @@
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from book2epub.ir.models import BookIR
 
 
 @dataclass
@@ -76,3 +79,4 @@ class RenderResult:
     presentation_mode: str = "legacy"
     style_profile_hash: str | None = None
     component_counts: dict[str, int] = field(default_factory=dict)
+    rendered_ir: "BookIR | None" = None

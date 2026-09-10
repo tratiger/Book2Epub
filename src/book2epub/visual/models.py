@@ -136,6 +136,16 @@ class OCRAuditRecord(BaseModel):
     confirmation_result: bool | None = None
     confirmation_observed_text: str | None = None
     visible_error_type: str
+    content_role: Literal[
+        "prose",
+        "caption",
+        "footnote",
+        "code_body",
+        "preformatted_body",
+        "math",
+        "table",
+        "unknown",
+    ] = "prose"
     mode: Literal["safe", "all"]
     status: Literal[
         "applied",

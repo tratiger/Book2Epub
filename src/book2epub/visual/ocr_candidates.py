@@ -46,6 +46,18 @@ COMMON_GLYPH_CONFUSIONS = re.compile(
 )
 
 
+ContentRole = Literal[
+    "prose",
+    "caption",
+    "footnote",
+    "code_body",
+    "preformatted_body",
+    "math",
+    "table",
+    "unknown",
+]
+
+
 class EligibleSegment(BaseModel):
     """An OCR-eligible text segment in the BookIR tree."""
 
@@ -58,6 +70,7 @@ class EligibleSegment(BaseModel):
     is_code: bool = False
     is_synthetic: bool = False
     source_span_type: str | None = None
+    content_role: ContentRole = "prose"
 
 
 class OCRCandidate(BaseModel):
@@ -71,6 +84,7 @@ class OCRCandidate(BaseModel):
     old_text_sha256: str
     is_code: bool = False
     reason: str
+    content_role: ContentRole = "prose"
 
 
 def iter_ocr_eligible_segments(
@@ -87,8 +101,12 @@ def iter_ocr_eligible_segments(
         return
 
     def _traverse_inlines(
-        inlines: list[Inline], block_id: str, is_caption: bool = False
+        inlines: list[Inline],
+        block_id: str,
+        is_caption: bool = False,
+        is_footnote: bool = False,
     ) -> Iterator[EligibleSegment]:
+        role: ContentRole = "caption" if is_caption else ("footnote" if is_footnote else "prose")
         for inl in inlines:
             if isinstance(inl, Text):
                 for seg in inl.source_segments:
@@ -106,10 +124,18 @@ def iter_ocr_eligible_segments(
                         text_sha256=seg.text_sha256,
                         is_code=False,
                         is_synthetic=False,
-                        source_span_type="caption" if is_caption else seg.source_span_type,
+                        source_span_type="caption" if is_caption else (
+                            "footnote" if is_footnote else seg.source_span_type
+                        ),
+                        content_role=role,
                     )
             elif isinstance(inl, Hyperlink):
-                yield from _traverse_inlines(inl.children, block_id, is_caption=is_caption)
+                yield from _traverse_inlines(
+                    inl.children,
+                    block_id,
+                    is_caption=is_caption,
+                    is_footnote=is_footnote,
+                )
             # InlineMath, LineBreak, PageBoundary are strictly skipped
 
     def _traverse_blocks(blks: list[Block]) -> Iterator[EligibleSegment]:
@@ -121,21 +147,25 @@ def iter_ocr_eligible_segments(
             if isinstance(blk, Table):
                 # Table HTML is strictly immutable; captions and footnotes may be reviewed
                 yield from _traverse_inlines(blk.caption, blk.id, is_caption=True)
-                yield from _traverse_inlines(blk.footnotes, blk.id, is_caption=True)
+                yield from _traverse_inlines(blk.footnotes, blk.id, is_footnote=True)
                 continue
 
             if isinstance(blk, (Figure, Chart)):
                 yield from _traverse_inlines(blk.caption, blk.id, is_caption=True)
-                yield from _traverse_inlines(blk.footnotes, blk.id, is_caption=True)
+                yield from _traverse_inlines(blk.footnotes, blk.id, is_footnote=True)
                 continue
 
-            if isinstance(blk, (Paragraph, Heading, Aside, Footnote)):
+            if isinstance(blk, Footnote):
+                yield from _traverse_inlines(blk.inlines, blk.id, is_footnote=True)
+                continue
+
+            if isinstance(blk, (Paragraph, Heading, Aside)):
                 yield from _traverse_inlines(blk.inlines, blk.id)
                 continue
 
             if isinstance(blk, (CodeBlock, PreformattedBlock)):
                 yield from _traverse_inlines(blk.caption, blk.id, is_caption=True)
-                yield from _traverse_inlines(blk.footnotes, blk.id, is_caption=True)
+                yield from _traverse_inlines(blk.footnotes, blk.id, is_footnote=True)
                 if mode == "all":
                     text = getattr(blk, "text", "")
                     if text:
@@ -147,6 +177,9 @@ def iter_ocr_eligible_segments(
                             if src_box
                             else None
                         )
+                        c_role: ContentRole = (
+                            "code_body" if isinstance(blk, CodeBlock) else "preformatted_body"
+                        )
                         yield EligibleSegment(
                             block_id=blk.id,
                             segment_id=f"{blk.id}-seg-0",
@@ -157,6 +190,7 @@ def iter_ocr_eligible_segments(
                             is_code=True,
                             is_synthetic=True,
                             source_span_type="code",
+                            content_role=c_role,
                         )
                 continue
 
@@ -252,6 +286,7 @@ def detect_ocr_candidates(
                 old_text_sha256=seg.text_sha256,
                 is_code=seg.is_code,
                 reason=reason,
+                content_role=seg.content_role,
             )
             candidates_by_page.setdefault(seg.page_idx, []).append(cand)
 

@@ -283,3 +283,20 @@ def typography_normalize_bookir(
 
     normalized_ir = bookir.model_copy(update={"blocks": normalized_blocks})
     return normalized_ir, report
+
+
+def reconstruct_text_from_source_segments(
+    segments: Sequence[SourceTextSegment],
+    block_id: str = "",
+) -> str:
+    """
+    Reconstruct visible text from a sequence of SourceTextSegments using authoritative
+    M11 boundary classification and spacing rules.
+    """
+    if not segments:
+        return ""
+    temp_inline = Text(text="", source_segments=list(segments))
+    report = NormalizationReport()
+    normalized = reconstruct_text_inline(temp_inline, block_id=block_id, report=report)
+    return normalized.text
+

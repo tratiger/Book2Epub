@@ -27,6 +27,7 @@ import pytest
 from book2epub.config import AppConfig, JobConfig, OCRCorrectionConfig, PresentationConfig
 from book2epub.ir.models import (
     BookIR,
+    CodeBlock,
     Figure,
     Footnote,
     Heading,
@@ -1008,4 +1009,220 @@ def test_x_atomic_epub_promotion_failure_does_not_replace_output(tmp_path: Path)
     # Verify temporary file was cleaned up
     tmp_epub = target_epub.with_suffix(".epub.tmp")
     assert not tmp_epub.exists()
+
+
+def test_y_code_indentation_and_newline_loss_fails_preservation() -> None:
+    """Test Y: Code indentation and newline collapse fails preservation QA."""
+    code_text = "def calculate(x):\n    result = x * 2\n    return result"
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="c-1",
+                page_idx=0,
+                reading_order=0,
+                source_type="code",
+                preformatted_text=code_text,
+                content_sha256=compute_text_sha256(code_text),
+            )
+        ],
+    )
+    # Renderer or pipeline mistakenly collapsed newlines and indentation into single spaces
+    corrupted_code = "def calculate(x): result = x * 2 return result"
+    final_ir = _create_dummy_ir([
+        CodeBlock(id="c-1", page_idx=0, reading_order=0, text=corrupted_code)
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+    assert "Text mismatch" in (ledger[0].reason or "")
+
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+    assert any(v.code == "TEXT_FABRICATION_OR_CORRUPTION" for v in violations)
+
+
+def test_z_corrupted_footnote_and_caption_content_fails_preservation() -> None:
+    """Test Z: Non-empty but modified footnote/caption fails with CORRUPTION violations."""
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="fn-blk",
+                page_idx=0,
+                reading_order=0,
+                source_type="footnote",
+                footnote_plain_text="Note 1: Original authoritative text.",
+                content_sha256=compute_text_sha256("Note 1: Original authoritative text."),
+            ),
+            SemanticEvidenceBlock(
+                block_id="fig-blk",
+                page_idx=0,
+                reading_order=1,
+                source_type="figure",
+                caption_plain_text="Figure 1: Architectural diagram.",
+                content_sha256=compute_text_sha256("Figure 1: Architectural diagram."),
+            ),
+        ],
+    )
+
+    final_ir = _create_dummy_ir([
+        Footnote(
+            id="fn-blk",
+            page_idx=0,
+            reading_order=0,
+            inlines=[Text(text="Note 1: Completely different content.")],
+        ),
+        Figure(
+            id="fig-blk",
+            page_idx=0,
+            reading_order=1,
+            asset_id="fig-asset",
+            caption=[Text(text="Figure 1: Completely different diagram caption.")],
+        ),
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir)
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+
+    assert any(v.code == "FOOTNOTE_CORRUPTION" for v in violations)
+    assert any(v.code == "CAPTION_CORRUPTION" for v in violations)
+
+
+def test_aa_code_body_ocr_audit_requires_independent_confirmation(tmp_path: Path) -> None:
+    """Test AA: OCR modifications in code body without Pass 2 confirmation fail OCR QA."""
+    audit_file = OCRCorrectionAuditFile(
+        mode="all",
+        eligible_segment_count=10,
+        candidate_count=1,
+        applied_count=1,
+        rejected_count=0,
+        budget_exceeded=False,
+        total_codepoints=100,
+        changed_codepoints=1,
+        audits=[
+            OCRAuditRecord(
+                block_id="code-1",
+                segment_id="code-1-seg-0",
+                page_idx=0,
+                bbox=[10, 10, 100, 100],
+                old_text="retum 0",
+                new_text="return 0",
+                old_sha256=compute_text_sha256("retum 0"),
+                new_sha256=compute_text_sha256("return 0"),
+                provider="mock",
+                model="mock-model",
+                request_ids=["req-1"],
+                first_confidence=0.999,
+                visible_error_type="character_confusion",
+                content_role="code_body",
+                mode="all",
+                status="applied",
+                # Confirmation is missing: confirmation_result is None
+                confirmation_result=None,
+            )
+        ],
+    )
+    p = tmp_path / "ocr-corrections.json"
+    p.write_text(audit_file.model_dump_json(indent=2), encoding="utf-8")
+
+    metrics, violations = evaluate_ocr_qa(p, cfg_mode="all")
+    assert any("Sensitive OCR proposal" in v for v in violations)
+
+
+def test_ab_typography_ir_parse_failure_in_m5_raises_runtime_error(tmp_path: Path) -> None:
+    """Test AB: Corrupted ir_typography_json causes M5 to raise RuntimeError."""
+    work_dir = tmp_path / "work"
+    paths = create_job_paths(work_dir)
+    paths.semantic_dir.mkdir(parents=True, exist_ok=True)
+    paths.qa_dir.mkdir(parents=True, exist_ok=True)
+    paths.render_oebps_dir.mkdir(parents=True, exist_ok=True)
+
+    # Corrupt ir_typography_json file
+    paths.ir_typography_json.write_text("NOT_VALID_JSON{{{", encoding="utf-8")
+
+    raw_middle = tmp_path / "middle.json"
+    raw_middle.write_text(json.dumps({"pdf_info": []}), encoding="utf-8")
+    book_ir = _create_dummy_ir([])
+
+    render_result = _create_dummy_render_result(paths.render_oebps_dir)
+    render_result.rendered_ir = None  # Force attempt to load from paths.ir_typography_json
+    pkg_result = _create_dummy_packaging_result(tmp_path / "book.epub")
+    cfg = JobConfig(app=AppConfig(strict=True))
+
+    with pytest.raises(RuntimeError, match="Failed to load typography-normalized BookIR"):
+        run_conversion_m5(
+            paths=paths,
+            raw_middle_path=raw_middle,
+            book_ir=book_ir,
+            render_result=render_result,
+            packaging_result=pkg_result,
+            cfg=cfg,
+        )
+
+
+def test_ac_supersession_without_resolved_replacement_fails_with_content_loss() -> None:
+    """Test AC: Supersession audit without matching block triggers CONTENT_LOSS."""
+    evidence = SemanticEvidenceBook(
+        job_id="test-job",
+        source_middle_sha256="m-hash",
+        raw_bookir_sha256="r-hash",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="tbl-ghost",
+                page_idx=0,
+                reading_order=0,
+                source_type="table_fallback",
+                plain_text="Source table fallback text",
+                content_sha256=compute_text_sha256("Source table fallback text"),
+            )
+        ],
+    )
+    # Audit claims table was retyped/applied to table, but final IR does not contain any replacement
+    audit = SemanticAuditRecord(
+        decision_id="dec-ghost",
+        block_id="tbl-ghost",
+        page_idx=0,
+        source_kind="table_fallback",
+        proposed_target="table",
+        final_target="table",
+        confidence=0.99,
+        provider="mock",
+        model="mock",
+        status="applied",
+    )
+    # Final IR is empty or contains an unrelated paragraph
+    final_ir = _create_dummy_ir([
+        Paragraph(id="unrelated-p", page_idx=0, reading_order=0, inlines=[Text(text="hello")])
+    ])
+
+    ledger = build_preservation_ledger(evidence, final_ir, audits=[audit])
+    assert ledger[0].disposition == "lost_error"
+
+    violations = evaluate_preservation_qa(ledger, evidence, final_ir)
+    assert any(v.code == "CONTENT_LOSS" for v in violations)
+
+
+def test_ad_ocr_artifact_mode_mismatch_fails_ocr_qa(tmp_path: Path) -> None:
+    """Test AD: Mode mismatch between OCR audit file and configured mode fails OCR QA."""
+    audit_file = OCRCorrectionAuditFile(
+        mode="safe",
+        eligible_segment_count=5,
+        candidate_count=0,
+        applied_count=0,
+        rejected_count=0,
+        budget_exceeded=False,
+        total_codepoints=50,
+        changed_codepoints=0,
+        audits=[],
+    )
+    p = tmp_path / "ocr-corrections.json"
+    p.write_text(audit_file.model_dump_json(indent=2), encoding="utf-8")
+
+    # Configured mode is "off", but file was generated under "safe"
+    metrics, violations = evaluate_ocr_qa(p, cfg_mode="off")
+    assert any("OCR correction audit mode mismatch" in v for v in violations)
+
 

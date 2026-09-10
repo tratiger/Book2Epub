@@ -53,6 +53,13 @@ def evaluate_ocr_qa(
                 audit_file.changed_codepoints / audit_file.total_codepoints
             )
 
+        # Invariant: OCR mode recorded in audit must match configured mode
+        if audit_file.mode != cfg_mode:
+            violations.append(
+                f"OCR correction audit mode mismatch: file recorded '{audit_file.mode}', "
+                f"expected configured mode '{cfg_mode}'"
+            )
+
         # Invariant: candidate count == applied + rejected == len(audits)
         if audit_file.candidate_count != audit_file.applied_count + audit_file.rejected_count:
             violations.append(
@@ -110,23 +117,35 @@ def evaluate_ocr_qa(
                     )
 
                 # Math source text is immutable
-                if "math" in a.block_id.lower() or "math" in a.segment_id.lower():
+                if (
+                    a.content_role == "math"
+                    or "math" in a.block_id.lower()
+                    or "math" in a.segment_id.lower()
+                ):
                     violations.append(
                         f"Math text was illegally modified by OCR proposal for block '{a.block_id}'"
                     )
 
                 # Table HTML is immutable
-                is_table = "table" in a.block_id.lower()
-                is_caption_or_fn = "caption" in a.segment_id.lower() or "fn" in a.segment_id.lower()
-                if is_table and not is_caption_or_fn:
+                is_table = a.content_role == "table" or "table" in a.block_id.lower()
+                is_caption_or_fn = (
+                    a.content_role in ("caption", "footnote")
+                    or "caption" in a.segment_id.lower()
+                    or "fn" in a.segment_id.lower()
+                )
+                if (a.content_role == "table") or (is_table and not is_caption_or_fn):
                     violations.append(
                         f"Table HTML was illegally modified by OCR proposal "
                         f"for block '{a.block_id}'"
                     )
 
                 # Sensitive / code confirmation check
-                is_sensitive = is_sensitive_change(a.old_text, a.new_text)
-                if is_sensitive:
+                is_code = a.content_role in ("code_body", "preformatted_body")
+                is_sensitive = is_sensitive_change(
+                    a.old_text, a.new_text, is_code_or_preformatted=is_code
+                )
+                needs_conf = is_sensitive or is_code
+                if needs_conf:
                     if a.confirmation_result is not True:
                         violations.append(
                             f"Sensitive OCR proposal for segment '{a.segment_id}' "

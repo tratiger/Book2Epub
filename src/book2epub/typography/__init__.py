@@ -15,7 +15,10 @@ from .models import (
     NormalizationReport,
     TypographyChangeRecord,
 )
-from .normalize import typography_normalize_bookir
+from .normalize import (
+    reconstruct_text_from_source_segments,
+    typography_normalize_bookir,
+)
 from .report import save_normalization_report
 from .spacing import collapse_intra_segment_spaces, decide_inter_segment_separator
 
@@ -35,6 +38,7 @@ __all__ = [
     "is_close_punct",
     "is_open_punct",
     "normalize_list_block",
+    "reconstruct_text_from_source_segments",
     "save_normalization_report",
     "try_dehyphenate",
     "typography_normalize_bookir",
