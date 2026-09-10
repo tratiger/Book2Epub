@@ -267,7 +267,7 @@ def run_conversion_m2(
             visual_source = VisualSource.resolve(cfg, paths=paths)
             if visual_source.has_visual:
                 vis_provider = create_provider(cfg, purpose="visual")
-                semantic_ir, _, ocr_recommended_block_ids = run_visual_arbitration(
+                semantic_ir, updated_audits, ocr_recommended_block_ids = run_visual_arbitration(
                     bookir=semantic_ir,
                     evidence=evidence_book,
                     draft=draft_book,
@@ -278,6 +278,12 @@ def run_conversion_m2(
                     provider=vis_provider,
                 )
                 save_bookir(semantic_ir, paths.ir_semantic_json)
+                # Write authoritative final audit artifact (M9-updated).
+                # applied.m8.json (written by stage.py) remains as the M8-only provisional.
+                paths.semantic_applied_json.write_text(
+                    json.dumps([a.model_dump() for a in updated_audits], indent=2),
+                    encoding="utf-8",
+                )
     else:
         semantic_ir = raw_ir
 

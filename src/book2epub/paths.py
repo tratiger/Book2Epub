@@ -183,6 +183,13 @@ class JobPaths:
         return self.semantic_dir / "applied.json"
 
     @property
+    def semantic_applied_m8_json(self) -> Path:
+        """Provisional M8-only audit artifact; written before M9 visual arbitration.
+        The authoritative final artifact is semantic/applied.json (written by pipeline.py
+        after M9 updates the audits)."""
+        return self.semantic_dir / "applied.m8.json"
+
+    @property
     def semantic_provider_usage_json(self) -> Path:
         return self.semantic_dir / "provider-usage.json"
 

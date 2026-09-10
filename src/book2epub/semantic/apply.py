@@ -49,7 +49,13 @@ def extract_inlines_text(inlines: list[Inline]) -> str:
 
 
 def extract_block_visible_text(block: Block) -> str:
-    """Extract visible user text for content-hash invariant checks."""
+    """Extract visible user text for content-hash invariant checks.
+
+    NOTE: Table is intentionally excluded — the invariant for Table→Preformatted
+    conversions is checked via evidence.preformatted_text, not a hash of the IR
+    node which contains HTML. Returning an empty string here for Table is
+    intentional so callers that need Table content must use the evidence source.
+    """
     if isinstance(block, (Paragraph, Heading)):
         return extract_inlines_text(block.inlines)
     elif isinstance(block, CodeBlock):
@@ -62,6 +68,8 @@ def extract_block_visible_text(block: Block) -> str:
         return "".join(extract_block_visible_text(b) for b in block.blocks)
     elif isinstance(block, ListBlock):
         return "".join(extract_inlines_text(item) for item in block.items)
+    # Table: visible text is in HTML source, not directly comparable via this helper.
+    # Callers must use SemanticEvidenceBlock.preformatted_text for Table content.
     return ""
 
 
@@ -97,6 +105,10 @@ def materialize_preformatted_from_evidence(
     )
 
 
+# ---------------------------------------------------------------------------
+# Pass A: Structure decisions (heading promotion/demotion, continuation)
+# ---------------------------------------------------------------------------
+
 def apply_structure_decisions(
     blocks: list[Block],
     decisions: dict[str, ReconciledStructureDecision],
@@ -107,15 +119,14 @@ def apply_structure_decisions(
     """
     Apply Pass A structural decisions (heading promotion/demotion and cross-page continuation).
     Enforces text immutability and returns (new_blocks, audit_records).
+
+    No in-place mutation of input blocks. All modifications produce new node instances
+    via constructor or model_copy.
     """
     new_blocks: list[Block] = []
     audits: list[SemanticAuditRecord] = []
-    blocks_to_skip: set[str] = set()
 
-    for idx, blk in enumerate(blocks):
-        if blk.id in blocks_to_skip:
-            continue
-
+    for blk in blocks:
         dec = decisions.get(blk.id)
         if not dec:
             new_blocks.append(blk)
@@ -195,13 +206,18 @@ def apply_structure_decisions(
             prior_id = dec.paragraph_continuation_of
             prior_blk = new_blocks[-1]
             if prior_blk.id == prior_id and isinstance(prior_blk, Paragraph):
-                # Merge into prior paragraph
+                # Build merged paragraph WITHOUT in-place mutation of prior_blk.
+                # Construct new combined inlines and sources lists.
                 page_boundary = PageBoundary(
                     page_idx=blk.sources[0].page_idx if blk.sources else 0
                 )
-                prior_blk.inlines.append(page_boundary)
-                prior_blk.inlines.extend(blk.inlines)
-                prior_blk.sources.extend(blk.sources)
+                merged_inlines = list(prior_blk.inlines) + [page_boundary] + list(blk.inlines)
+                merged_sources = list(prior_blk.sources) + list(blk.sources)
+                merged_para = prior_blk.model_copy(
+                    update={"inlines": merged_inlines, "sources": merged_sources}
+                )
+                # Replace the last element in new_blocks with the merged paragraph
+                new_blocks[-1] = merged_para
 
                 audits.append(
                     SemanticAuditRecord(
@@ -254,8 +270,9 @@ def apply_structure_decisions(
                 )
                 continue
             elif isinstance(blk, Heading):
-                blk.level = dec.heading_level
-                new_blocks.append(blk)
+                # model_copy: no in-place mutation
+                new_heading = blk.model_copy(update={"level": dec.heading_level})
+                new_blocks.append(new_heading)
                 audits.append(
                     SemanticAuditRecord(
                         decision_id=f"pass-a-{blk.id}",
@@ -310,6 +327,48 @@ def apply_structure_decisions(
     return new_blocks, audits
 
 
+# ---------------------------------------------------------------------------
+# Pass B: Semantic block decisions
+# ---------------------------------------------------------------------------
+
+_PREFORMATTED_SUBTYPES = frozenset({
+    "terminal_output",
+    "shell_command",
+    "source_code",
+    "log_output",
+    "config_file",
+    "generic_preformatted",
+    "repl_session",
+    "terminal_session",
+})
+
+
+def _reject_invalid(
+    blk: Block,
+    source_kind: str,
+    target: str,
+    dec: ReconciledSemanticDecision,
+    hash_before: str,
+    reason: str,
+) -> tuple[Block, SemanticAuditRecord]:
+    """Produce a rejection audit record and return the original block unchanged."""
+    return blk, SemanticAuditRecord(
+        decision_id=f"pass-b-{blk.id}",
+        block_id=blk.id,
+        source_kind=source_kind,
+        proposed_target=target,
+        final_target=source_kind,
+        confidence=dec.confidence,
+        evidence_codes=dec.evidence_codes,
+        provider="semantic",
+        model="semantic",
+        request_ids=dec.chunk_ids,
+        status="rejected_invalid_target",
+        rejection_reason=reason,
+        source_content_sha256=hash_before,
+    )
+
+
 def apply_semantic_decisions(
     blocks: list[Block],
     decisions: dict[str, ReconciledSemanticDecision],
@@ -320,6 +379,12 @@ def apply_semantic_decisions(
     """
     Apply Pass B semantic block decisions (table -> preformatted, code subtype, callout, etc.).
     Enforces content immutability (M8 Section 11).
+
+    Hard gate: for any target that is not keep/keep_original, the target MUST appear in
+    evidence.allowed_targets before any case branch is executed. This prevents LLM
+    hallucinated targets from reaching materialization.
+
+    No in-place mutation of input blocks.
     """
     new_blocks: list[Block] = []
     audits: list[SemanticAuditRecord] = []
@@ -331,11 +396,12 @@ def apply_semantic_decisions(
             continue
 
         source_kind = blk.kind
-        text_before = extract_block_visible_text(blk)
-        hash_before = compute_text_sha256(text_before)
+        hash_before = compute_text_sha256(extract_block_visible_text(blk))
         target = dec.target
 
-        # Check conflict
+        # ------------------------------------------------------------------ #
+        # Check conflict                                                       #
+        # ------------------------------------------------------------------ #
         if dec.is_conflict:
             audits.append(
                 SemanticAuditRecord(
@@ -357,7 +423,9 @@ def apply_semantic_decisions(
             new_blocks.append(blk)
             continue
 
-        # Confidence checks
+        # ------------------------------------------------------------------ #
+        # Confidence checks                                                    #
+        # ------------------------------------------------------------------ #
         min_thresh = single_vote_threshold if dec.single_vote else auto_apply_threshold
         if dec.confidence < 0.45:
             audits.append(
@@ -401,46 +469,60 @@ def apply_semantic_decisions(
             new_blocks.append(blk)
             continue
 
+        # ------------------------------------------------------------------ #
+        # HARD GATE: allowed_targets check — must happen before any case       #
+        # branch. Evidence block must exist and target must be in its          #
+        # allowed_targets whitelist.                                           #
+        # keep / keep_original already handled above; all other targets        #
+        # require explicit evidence authorization.                             #
+        # ------------------------------------------------------------------ #
         ev = evidence_lookup.get(blk.id)
+        if ev is None:
+            rejected_blk, audit = _reject_invalid(
+                blk, source_kind, target, dec, hash_before,
+                reason=(
+                    f"No evidence block found for block_id={blk.id!r}; "
+                    f"cannot authorize target={target!r}"
+                ),
+            )
+            audits.append(audit)
+            new_blocks.append(rejected_blk)
+            continue
 
-        # 1. table -> preformatted (terminal_output, shell_command, etc.)
-        if isinstance(blk, Table) and target in (
-            "terminal_output",
-            "shell_command",
-            "source_code",
-            "log_output",
-            "config_file",
-            "generic_preformatted",
-            "repl_session",
-            "terminal_session",
-        ):
-            if not ev or not ev.preformatted_text:
-                audits.append(
-                    SemanticAuditRecord(
-                        decision_id=f"pass-b-{blk.id}",
-                        block_id=blk.id,
-                        source_kind=source_kind,
-                        proposed_target=target,
-                        final_target=source_kind,
-                        confidence=dec.confidence,
-                        evidence_codes=dec.evidence_codes,
-                        provider="semantic",
-                        model="semantic",
-                        request_ids=dec.chunk_ids,
-                        status="rejected_invalid_target",
-                        rejection_reason="No preformatted text evidence exists",
-                        source_content_sha256=hash_before,
-                    )
+        if not validate_semantic_target(ev, target):
+            rejected_blk, audit = _reject_invalid(
+                blk, source_kind, target, dec, hash_before,
+                reason=(
+                    f"Target {target!r} not in allowed_targets for block {blk.id!r} "
+                    f"(allowed: {ev.allowed_targets!r})"
+                ),
+            )
+            audits.append(audit)
+            new_blocks.append(rejected_blk)
+            continue
+
+        # ------------------------------------------------------------------ #
+        # 1. table -> preformatted (terminal_output, shell_command, etc.)     #
+        # ------------------------------------------------------------------ #
+        if isinstance(blk, Table) and target in _PREFORMATTED_SUBTYPES:
+            if not ev.preformatted_text:
+                rejected_blk, audit = _reject_invalid(
+                    blk, source_kind, target, dec, hash_before,
+                    reason="No preformatted text evidence exists",
                 )
-                new_blocks.append(blk)
+                audits.append(audit)
+                new_blocks.append(rejected_blk)
                 continue
 
+            # Table content invariant: use evidence preformatted_text for
+            # new block; do NOT use extract_block_visible_text(Table)=="".
             new_blk = PreformattedBlock(
                 id=blk.id,
                 sources=blk.sources,
                 subtype=target,  # type: ignore[arg-type]
                 text=ev.preformatted_text,
-                caption=blk.caption,
+                caption=list(blk.caption),
+                footnotes=list(blk.footnotes),
             )
             new_blocks.append(new_blk)
             audits.append(
@@ -461,23 +543,18 @@ def apply_semantic_decisions(
             )
             continue
 
-        # 2. code -> richer preformatted subtype
-        if isinstance(blk, CodeBlock) and target in (
-            "shell_command",
-            "terminal_output",
-            "terminal_session",
-            "repl_session",
-            "log_output",
-            "config_file",
-            "generic_preformatted",
-        ):
+        # ------------------------------------------------------------------ #
+        # 2. code -> richer preformatted subtype                              #
+        # ------------------------------------------------------------------ #
+        if isinstance(blk, CodeBlock) and target in _PREFORMATTED_SUBTYPES:
             new_blk = PreformattedBlock(
                 id=blk.id,
                 sources=blk.sources,
                 subtype=target,  # type: ignore[arg-type]
                 text=blk.text,
                 language=blk.language,
-                caption=blk.caption,
+                caption=list(blk.caption),
+                footnotes=list(blk.footnotes),
             )
             # Text bytes must match CodeBlock.text exactly
             assert compute_text_sha256(new_blk.text) == compute_text_sha256(blk.text)
@@ -500,8 +577,10 @@ def apply_semantic_decisions(
             )
             continue
 
-        # 3. paragraph -> callout
-        if isinstance(blk, Paragraph) and target.startswith("callout_") or target == "sidebar":
+        # ------------------------------------------------------------------ #
+        # 3. paragraph -> callout                                             #
+        # ------------------------------------------------------------------ #
+        if isinstance(blk, Paragraph) and (target.startswith("callout_") or target == "sidebar"):
             callout_sub = (
                 target.replace("callout_", "") if target.startswith("callout_") else "sidebar"
             )
@@ -537,7 +616,9 @@ def apply_semantic_decisions(
             )
             continue
 
-        # 4. paragraph -> block quote
+        # ------------------------------------------------------------------ #
+        # 4. paragraph -> block quote                                         #
+        # ------------------------------------------------------------------ #
         if isinstance(blk, Paragraph) and target in ("quote", "block_quote"):
             new_quote = BlockQuote(
                 id=blk.id,
@@ -568,12 +649,17 @@ def apply_semantic_decisions(
             )
             continue
 
-        # 5. paragraph -> list
+        # ------------------------------------------------------------------ #
+        # 5. paragraph -> list                                                #
+        # ------------------------------------------------------------------ #
         if isinstance(blk, Paragraph) and target in ("list", "unordered_list", "ordered_list"):
             # Allowed only when evidence has at least two source lines/items with parsable marker
-            lines = text_before.strip().splitlines()
+            text_before_visible = extract_block_visible_text(blk)
+            lines = text_before_visible.strip().splitlines()
             if len(lines) >= 2:
-                items: list[list[Inline]] = [[Text(text=line)] for line in lines if line.strip()]
+                items: list[list[Inline]] = [
+                    [Text(text=line)] for line in lines if line.strip()
+                ]
                 is_ordered = target == "ordered_list"
                 new_list = ListBlock(
                     id=blk.id,
@@ -621,27 +707,17 @@ def apply_semantic_decisions(
                 new_blocks.append(blk)
                 continue
 
-        # 6. text -> table (only if table_html is available in evidence)
+        # ------------------------------------------------------------------ #
+        # 6. text -> table (only if table_html is available in evidence)      #
+        # ------------------------------------------------------------------ #
         if isinstance(blk, Paragraph) and target == "table":
-            if not ev or not ev.table_html_available or not ev.table_html:
-                audits.append(
-                    SemanticAuditRecord(
-                        decision_id=f"pass-b-{blk.id}",
-                        block_id=blk.id,
-                        source_kind=source_kind,
-                        proposed_target="table",
-                        final_target=source_kind,
-                        confidence=dec.confidence,
-                        evidence_codes=dec.evidence_codes,
-                        provider="semantic",
-                        model="semantic",
-                        request_ids=dec.chunk_ids,
-                        status="rejected_invalid_target",
-                        rejection_reason="No table_html evidence exists for table materialization",
-                        source_content_sha256=hash_before,
-                    )
+            if not ev.table_html_available or not ev.table_html:
+                rejected_blk, audit = _reject_invalid(
+                    blk, source_kind, "table", dec, hash_before,
+                    reason="No table_html evidence exists for table materialization",
                 )
-                new_blocks.append(blk)
+                audits.append(audit)
+                new_blocks.append(rejected_blk)
                 continue
             else:
                 new_tbl = Table(
@@ -668,7 +744,7 @@ def apply_semantic_decisions(
                 )
                 continue
 
-        # Default: keep original
+        # Default: keep original (target was allowed but no specific case handled it)
         new_blocks.append(blk)
 
     return new_blocks, audits
