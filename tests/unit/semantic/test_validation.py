@@ -1,7 +1,10 @@
 """Unit tests for provider response scope validation (M8 hardening).
 
 Tests H: out-of-scope block_id rejection
-Tests I: wrong chunk_id detection
+Tests I: wrong chunk_id detection (exact match contract)
+Tests K: duplicate decision in same batch detection & filtering
+Tests L: paragraph_continuation_of scope validation & sanitization
+Tests M: related_block_ids scope validation & sanitization
 """
 
 import pytest
@@ -48,10 +51,9 @@ def test_structure_batch_filters_out_of_scope_block_ids() -> None:
     must be filtered out, not silently applied."""
     chunk = _make_chunk("sem-0001-aabbcc", ["blk-001", "blk-002"])
 
-    # Provider returned a decision for blk-003 which is NOT in this chunk
     batch = StructureDecisionBatch(
         schema_version="1.0",
-        chunk_id="sem-0001-aabbcc-pass-a",
+        chunk_id="sem-0001-aabbcc",  # Exact match
         decisions=[
             StructureDecision(
                 block_id="blk-001",
@@ -72,9 +74,7 @@ def test_structure_batch_filters_out_of_scope_block_ids() -> None:
         ],
     )
 
-    violations = validate_structure_batch_scope(
-        batch, chunk, request_id="sem-0001-aabbcc-pass-a"
-    )
+    violations = validate_structure_batch_scope(batch, chunk)
     assert len(violations) == 1
     assert "blk-003" in violations[0]
 
@@ -90,7 +90,7 @@ def test_semantic_batch_filters_out_of_scope_block_ids() -> None:
 
     batch = SemanticDecisionBatch(
         schema_version="1.0",
-        chunk_id="sem-0002-xxyyzz-pass-b",
+        chunk_id="sem-0002-xxyyzz",  # Exact match
         decisions=[
             SemanticDecision(
                 block_id="blk-010",
@@ -100,7 +100,7 @@ def test_semantic_batch_filters_out_of_scope_block_ids() -> None:
                 rationale="",
             ),
             SemanticDecision(
-                block_id="blk-999",  # Out of scope — different chunk's block
+                block_id="blk-999",  # Out of scope
                 target="callout_note",
                 confidence=0.88,
                 evidence_codes=[],
@@ -109,9 +109,7 @@ def test_semantic_batch_filters_out_of_scope_block_ids() -> None:
         ],
     )
 
-    violations = validate_semantic_batch_scope(
-        batch, chunk, request_id="sem-0002-xxyyzz-pass-b"
-    )
+    violations = validate_semantic_batch_scope(batch, chunk)
     assert len(violations) == 1
     assert "blk-999" in violations[0]
 
@@ -131,10 +129,10 @@ def test_overlap_block_ids_are_in_scope() -> None:
 
     batch = SemanticDecisionBatch(
         schema_version="1.0",
-        chunk_id="sem-0003-overlap-pass-b",
+        chunk_id="sem-0003-overlap",
         decisions=[
             SemanticDecision(
-                block_id="blk-019",  # Overlap block — should be valid
+                block_id="blk-019",  # Overlap block — valid
                 target="keep",
                 confidence=0.99,
                 evidence_codes=[],
@@ -143,25 +141,22 @@ def test_overlap_block_ids_are_in_scope() -> None:
         ],
     )
 
-    violations = validate_semantic_batch_scope(
-        batch, chunk, request_id="sem-0003-overlap-pass-b"
-    )
+    violations = validate_semantic_batch_scope(batch, chunk)
     assert violations == [], "Overlap block_ids must be accepted as in-scope"
 
 
 # ---------------------------------------------------------------------------
-# Test I: Wrong chunk_id detection
+# Test I: Exact chunk_id detection
 # ---------------------------------------------------------------------------
 
 
 def test_structure_batch_wrong_chunk_id_raises() -> None:
-    """Test I: A StructureDecisionBatch whose chunk_id doesn't match the request
-    must raise ScopeValidationError (critical violation)."""
+    """Test I: StructureDecisionBatch chunk_id must match chunk.chunk_id exactly."""
     chunk = _make_chunk("sem-0004-real", ["blk-030"])
 
     batch = StructureDecisionBatch(
         schema_version="1.0",
-        chunk_id="sem-9999-wrong",  # Completely wrong chunk_id
+        chunk_id="sem-9999-wrong",  # Wrong chunk_id
         decisions=[
             StructureDecision(
                 block_id="blk-030",
@@ -175,19 +170,40 @@ def test_structure_batch_wrong_chunk_id_raises() -> None:
     )
 
     with pytest.raises(ScopeValidationError, match="chunk_id"):
-        validate_structure_batch_scope(
-            batch, chunk, request_id="sem-0004-real-pass-a"
-        )
+        validate_structure_batch_scope(batch, chunk)
+
+
+def test_structure_batch_request_id_as_chunk_id_raises() -> None:
+    """Test I (contract enforcement): request_id (e.g. sem-0004-real-pass-a)
+    is NOT acceptable as chunk_id; chunk_id must be the document chunk ID."""
+    chunk = _make_chunk("sem-0004-real", ["blk-030"])
+
+    batch = StructureDecisionBatch(
+        schema_version="1.0",
+        chunk_id="sem-0004-real-pass-a",  # request_id, not chunk_id!
+        decisions=[
+            StructureDecision(
+                block_id="blk-030",
+                is_heading=True,
+                heading_level=2,
+                confidence=0.90,
+                evidence_codes=[],
+                rationale="",
+            ),
+        ],
+    )
+
+    with pytest.raises(ScopeValidationError, match="chunk_id"):
+        validate_structure_batch_scope(batch, chunk)
 
 
 def test_semantic_batch_wrong_chunk_id_raises() -> None:
-    """Test I: A SemanticDecisionBatch whose chunk_id doesn't match the request
-    must raise ScopeValidationError."""
+    """Test I: SemanticDecisionBatch chunk_id must match chunk.chunk_id exactly."""
     chunk = _make_chunk("sem-0005-real", ["blk-040"])
 
     batch = SemanticDecisionBatch(
         schema_version="1.0",
-        chunk_id="sem-0006-other-chunk",  # Different chunk entirely
+        chunk_id="sem-0006-other-chunk",
         decisions=[
             SemanticDecision(
                 block_id="blk-040",
@@ -200,46 +216,16 @@ def test_semantic_batch_wrong_chunk_id_raises() -> None:
     )
 
     with pytest.raises(ScopeValidationError, match="chunk_id"):
-        validate_semantic_batch_scope(
-            batch, chunk, request_id="sem-0005-real-pass-b"
-        )
+        validate_semantic_batch_scope(batch, chunk)
 
 
-def test_batch_chunk_id_matches_request_id() -> None:
-    """Provider may echo request_id as chunk_id (mock providers do this).
-    This must be accepted without error."""
-    chunk = _make_chunk("sem-0006-chunk", ["blk-050"])
-
-    # Provider echoes request_id (not chunk_id) — this is valid
-    batch = StructureDecisionBatch(
-        schema_version="1.0",
-        chunk_id="sem-0006-chunk-pass-a",  # This IS the request_id
-        decisions=[
-            StructureDecision(
-                block_id="blk-050",
-                is_heading=False,
-                heading_level=None,
-                confidence=0.85,
-                evidence_codes=[],
-                rationale="",
-            ),
-        ],
-    )
-
-    # Should NOT raise; request_id is an acceptable chunk_id value
-    violations = validate_structure_batch_scope(
-        batch, chunk, request_id="sem-0006-chunk-pass-a"
-    )
-    assert violations == []
-
-
-def test_batch_chunk_id_matches_chunk_chunk_id() -> None:
-    """Provider may echo chunk.chunk_id directly — also valid."""
+def test_batch_chunk_id_exact_match_succeeds() -> None:
+    """Exact match of batch.chunk_id == chunk.chunk_id succeeds."""
     chunk = _make_chunk("sem-0007-chunk", ["blk-060"])
 
     batch = SemanticDecisionBatch(
         schema_version="1.0",
-        chunk_id="sem-0007-chunk",  # Matches chunk.chunk_id directly
+        chunk_id="sem-0007-chunk",
         decisions=[
             SemanticDecision(
                 block_id="blk-060",
@@ -251,7 +237,157 @@ def test_batch_chunk_id_matches_chunk_chunk_id() -> None:
         ],
     )
 
-    violations = validate_semantic_batch_scope(
-        batch, chunk, request_id="sem-0007-chunk-pass-b"
-    )
+    violations = validate_semantic_batch_scope(batch, chunk)
     assert violations == []
+
+
+# ---------------------------------------------------------------------------
+# Test K: Duplicate block_id within same batch
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_decision_in_structure_batch_detected_and_filtered() -> None:
+    """Test K: If a provider returns multiple decisions for the same block_id
+    within a single batch, it must be detected and filtered out as a conflict."""
+    chunk = _make_chunk("sem-0008-dup", ["blk-070", "blk-071"])
+
+    batch = StructureDecisionBatch(
+        schema_version="1.0",
+        chunk_id="sem-0008-dup",
+        decisions=[
+            StructureDecision(
+                block_id="blk-070",
+                is_heading=True,
+                heading_level=1,
+                confidence=0.90,
+                evidence_codes=[],
+                rationale="First vote",
+            ),
+            StructureDecision(
+                block_id="blk-070",  # Duplicate!
+                is_heading=False,
+                heading_level=None,
+                confidence=0.85,
+                evidence_codes=[],
+                rationale="Second conflicting vote",
+            ),
+            StructureDecision(
+                block_id="blk-071",  # Legitimate single decision
+                is_heading=True,
+                heading_level=2,
+                confidence=0.95,
+                evidence_codes=[],
+                rationale="Clean vote",
+            ),
+        ],
+    )
+
+    violations = validate_structure_batch_scope(batch, chunk)
+    assert any("Duplicate" in v for v in violations)
+
+    filtered = filter_out_of_scope_structure_decisions(batch, chunk)
+    # The duplicate block_id blk-070 must be filtered out; blk-071 retained
+    assert len(filtered.decisions) == 1
+    assert filtered.decisions[0].block_id == "blk-071"
+
+
+def test_duplicate_decision_in_semantic_batch_detected_and_filtered() -> None:
+    """Test K: Duplicate decisions for the same block_id in SemanticDecisionBatch
+    must be detected and filtered."""
+    chunk = _make_chunk("sem-0009-dup", ["blk-080"])
+
+    batch = SemanticDecisionBatch(
+        schema_version="1.0",
+        chunk_id="sem-0009-dup",
+        decisions=[
+            SemanticDecision(
+                block_id="blk-080",
+                target="terminal_output",
+                confidence=0.90,
+                evidence_codes=[],
+                rationale="First vote",
+            ),
+            SemanticDecision(
+                block_id="blk-080",  # Duplicate!
+                target="shell_command",
+                confidence=0.85,
+                evidence_codes=[],
+                rationale="Second vote",
+            ),
+        ],
+    )
+
+    violations = validate_semantic_batch_scope(batch, chunk)
+    assert any("Duplicate" in v for v in violations)
+
+    filtered = filter_out_of_scope_semantic_decisions(batch, chunk)
+    assert len(filtered.decisions) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test L: paragraph_continuation_of scope validation & sanitization
+# ---------------------------------------------------------------------------
+
+
+def test_paragraph_continuation_of_out_of_scope_detected_and_sanitized() -> None:
+    """Test L: StructureDecision with out-of-scope paragraph_continuation_of
+    must be flagged and sanitized (continuation target removed)."""
+    chunk = _make_chunk("sem-0010-cont", ["blk-090", "blk-091"])
+
+    batch = StructureDecisionBatch(
+        schema_version="1.0",
+        chunk_id="sem-0010-cont",
+        decisions=[
+            StructureDecision(
+                block_id="blk-091",
+                is_heading=False,
+                heading_level=None,
+                paragraph_continuation_of="blk-foreign",  # Not in chunk!
+                confidence=0.92,
+                evidence_codes=[],
+                rationale="",
+            ),
+        ],
+    )
+
+    violations = validate_structure_batch_scope(batch, chunk)
+    assert len(violations) == 1
+    assert "paragraph_continuation_of='blk-foreign'" in violations[0]
+
+    filtered = filter_out_of_scope_structure_decisions(batch, chunk)
+    assert len(filtered.decisions) == 1
+    assert filtered.decisions[0].paragraph_continuation_of is None
+
+
+# ---------------------------------------------------------------------------
+# Test M: related_block_ids scope validation & sanitization
+# ---------------------------------------------------------------------------
+
+
+def test_related_block_ids_out_of_scope_detected_and_sanitized() -> None:
+    """Test M: SemanticDecision with out-of-scope related_block_ids
+    must be flagged and the foreign IDs stripped."""
+    chunk = _make_chunk("sem-0011-rel", ["blk-100", "blk-101"])
+
+    batch = SemanticDecisionBatch(
+        schema_version="1.0",
+        chunk_id="sem-0011-rel",
+        decisions=[
+            SemanticDecision(
+                block_id="blk-100",
+                target="callout_note",
+                confidence=0.90,
+                evidence_codes=[],
+                related_block_ids=["blk-101", "blk-ghost"],  # blk-ghost is out of scope
+                rationale="",
+            ),
+        ],
+    )
+
+    violations = validate_semantic_batch_scope(batch, chunk)
+    assert len(violations) == 1
+    assert "related_block_id='blk-ghost'" in violations[0]
+
+    filtered = filter_out_of_scope_semantic_decisions(batch, chunk)
+    assert len(filtered.decisions) == 1
+    assert filtered.decisions[0].related_block_ids == ["blk-101"]

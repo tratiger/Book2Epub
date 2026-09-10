@@ -67,11 +67,13 @@ class MockMultimodalPipelineProvider:
         import re
 
         block_ids = re.findall(r'"block_id":\s*"([^"]+)"', request.user_text)
+        chunk_match = re.search(r"CHUNK_ID:\s*(\S+)", request.user_text)
+        chunk_id = chunk_match.group(1) if chunk_match else request.request_id
 
         if response_model == StructureDecisionBatch:
             batch = StructureDecisionBatch(
                 schema_version="1.0",
-                chunk_id=request.request_id,
+                chunk_id=chunk_id,
                 decisions=[
                     StructureDecision(
                         block_id=block_ids[0] if block_ids else "blk-00001",
@@ -98,7 +100,7 @@ class MockMultimodalPipelineProvider:
             # Proposed as terminal_output with confidence 0.70 (<0.80 -> queued for visual review)
             batch = SemanticDecisionBatch(
                 schema_version="1.0",
-                chunk_id=request.request_id,
+                chunk_id=chunk_id,
                 decisions=[
                     SemanticDecision(
                         block_id=block_ids[-1] if block_ids else "blk-00003",

@@ -3,7 +3,7 @@
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from book2epub.config import JobConfig
@@ -35,6 +35,8 @@ from book2epub.semantic.prompts import (
     PASS_B_USER_PROMPT_TEMPLATE,
 )
 from book2epub.semantic.reconcile import (
+    ReconciledSemanticDecision,
+    ReconciledStructureDecision,
     reconcile_semantic_batches,
     reconcile_structure_batches,
 )
@@ -67,6 +69,8 @@ class SemanticStageResult:
     preserved_originals_count: int
     low_confidence_count: int
     conflict_count: int
+    struct_decisions: dict[str, ReconciledStructureDecision] = field(default_factory=dict)
+    semantic_decisions: dict[str, ReconciledSemanticDecision] = field(default_factory=dict)
 
 
 def _record_provider_usage(paths: JobPaths, usage_dict: dict[str, Any]) -> None:
@@ -348,4 +352,6 @@ def run_semantic_reconstruction(
         preserved_originals_count=preserved_count,
         low_confidence_count=low_conf_count,
         conflict_count=total_conflicts,
+        struct_decisions=reconciled_struct,
+        semantic_decisions=reconciled_sem,
     )

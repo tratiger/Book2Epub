@@ -1,14 +1,18 @@
 """Provider response scope validation for semantic and structure batches (M8 hardening).
 
 Validates that every decision returned by a provider:
-- belongs to the chunk that was sent in the request (chunk_id match)
-- references a block_id that was included in that chunk
+- belongs to the chunk that was sent in the request (exact chunk_id match)
+- references a block_id that belongs to that chunk (primary + overlap)
+- contains no duplicate block_ids within the same batch
+- references paragraph_continuation_of within the chunk scope
+- references related_block_ids within the chunk scope
 
 These checks prevent a provider from injecting or cross-contaminating decisions
 across chunks, which would silently corrupt the BookIR.
 """
 
 import logging
+from collections import Counter
 
 from book2epub.semantic.chunking import SemanticChunkInput
 from book2epub.semantic.decisions import SemanticDecisionBatch
@@ -31,33 +35,60 @@ def _chunk_block_ids(chunk: SemanticChunkInput) -> frozenset[str]:
 def validate_structure_batch_scope(
     batch: StructureDecisionBatch,
     chunk: SemanticChunkInput,
-    request_id: str,
+    request_id: str | None = None,
 ) -> list[str]:
     """Validate a StructureDecisionBatch returned by a provider against its originating chunk.
 
+    Contract:
+    - batch.chunk_id must EXACTLY match chunk.chunk_id (request_id is for API audit only).
+    - every decision.block_id must be in chunk scope (primary + overlap).
+    - no duplicate block_ids in the same batch.
+    - decision.paragraph_continuation_of (if set) must be in chunk scope.
+
     Returns a list of human-readable violation strings (empty == clean).
-    Raises ScopeValidationError for critical violations (wrong chunk_id where
-    neither the batch chunk_id nor the expected chunk_id matches).
+    Raises ScopeValidationError for critical violations (wrong chunk_id).
     """
     violations: list[str] = []
 
-    # 1. chunk_id must match: provider may echo either chunk_id or request_id
+    # 1. chunk_id must match chunk.chunk_id EXACTLY
     expected_chunk_id = chunk.chunk_id
-    if batch.chunk_id not in (request_id, expected_chunk_id):
+    if batch.chunk_id != expected_chunk_id:
         msg = (
             f"StructureDecisionBatch chunk_id={batch.chunk_id!r} does not match "
-            f"request_id={request_id!r} or expected chunk={expected_chunk_id!r}"
+            f"expected chunk_id={expected_chunk_id!r}"
         )
         logger.error(msg)
         raise ScopeValidationError(msg)
 
-    # 2. Every block_id in decisions must belong to this chunk
     valid_ids = _chunk_block_ids(chunk)
+
+    # 2. Check for duplicate block_ids in the same batch
+    counts = Counter(d.block_id for d in batch.decisions)
+    for bid, count in counts.items():
+        if count > 1:
+            violation = (
+                f"Duplicate decision for block_id {bid!r} ({count} occurrences) "
+                f"in chunk {expected_chunk_id!r}"
+            )
+            logger.warning(violation)
+            violations.append(violation)
+
+    # 3. Every block_id must belong to this chunk
     for dec in batch.decisions:
         if dec.block_id not in valid_ids:
             violation = (
                 f"StructureDecision block_id={dec.block_id!r} not in chunk "
                 f"{expected_chunk_id!r} (valid ids count: {len(valid_ids)})"
+            )
+            logger.warning(violation)
+            violations.append(violation)
+
+        # 4. paragraph_continuation_of must be in chunk scope
+        if dec.paragraph_continuation_of and dec.paragraph_continuation_of not in valid_ids:
+            violation = (
+                f"StructureDecision block_id={dec.block_id!r} references "
+                f"out-of-scope paragraph_continuation_of={dec.paragraph_continuation_of!r} "
+                f"in chunk {expected_chunk_id!r}"
             )
             logger.warning(violation)
             violations.append(violation)
@@ -68,27 +99,45 @@ def validate_structure_batch_scope(
 def validate_semantic_batch_scope(
     batch: SemanticDecisionBatch,
     chunk: SemanticChunkInput,
-    request_id: str,
+    request_id: str | None = None,
 ) -> list[str]:
     """Validate a SemanticDecisionBatch returned by a provider against its originating chunk.
+
+    Contract:
+    - batch.chunk_id must EXACTLY match chunk.chunk_id.
+    - every decision.block_id must be in chunk scope (primary + overlap).
+    - no duplicate block_ids in the same batch.
+    - related_block_ids must all be in chunk scope.
 
     Returns a list of human-readable violation strings (empty == clean).
     Raises ScopeValidationError for critical violations (wrong chunk_id).
     """
     violations: list[str] = []
 
-    # 1. chunk_id must match: provider may echo either chunk_id or request_id
+    # 1. chunk_id must match chunk.chunk_id EXACTLY
     expected_chunk_id = chunk.chunk_id
-    if batch.chunk_id not in (request_id, expected_chunk_id):
+    if batch.chunk_id != expected_chunk_id:
         msg = (
             f"SemanticDecisionBatch chunk_id={batch.chunk_id!r} does not match "
-            f"request_id={request_id!r} or expected chunk={expected_chunk_id!r}"
+            f"expected chunk_id={expected_chunk_id!r}"
         )
         logger.error(msg)
         raise ScopeValidationError(msg)
 
-    # 2. Every block_id in decisions must belong to this chunk
     valid_ids = _chunk_block_ids(chunk)
+
+    # 2. Check for duplicate block_ids in the same batch
+    counts = Counter(d.block_id for d in batch.decisions)
+    for bid, count in counts.items():
+        if count > 1:
+            violation = (
+                f"Duplicate decision for block_id {bid!r} ({count} occurrences) "
+                f"in chunk {expected_chunk_id!r}"
+            )
+            logger.warning(violation)
+            violations.append(violation)
+
+    # 3. Every block_id and related_block_ids must belong to this chunk
     for dec in batch.decisions:
         if dec.block_id not in valid_ids:
             violation = (
@@ -98,6 +147,16 @@ def validate_semantic_batch_scope(
             logger.warning(violation)
             violations.append(violation)
 
+        # 4. related_block_ids must all be in chunk scope
+        for rel_id in dec.related_block_ids:
+            if rel_id not in valid_ids:
+                violation = (
+                    f"SemanticDecision block_id={dec.block_id!r} references "
+                    f"out-of-scope related_block_id={rel_id!r} in chunk {expected_chunk_id!r}"
+                )
+                logger.warning(violation)
+                violations.append(violation)
+
     return violations
 
 
@@ -105,17 +164,41 @@ def filter_out_of_scope_structure_decisions(
     batch: StructureDecisionBatch,
     chunk: SemanticChunkInput,
 ) -> StructureDecisionBatch:
-    """Return a new StructureDecisionBatch with out-of-scope decisions removed."""
+    """Return a new StructureDecisionBatch with filtered decisions."""
     valid_ids = _chunk_block_ids(chunk)
-    good_decisions = [d for d in batch.decisions if d.block_id in valid_ids]
-    if len(good_decisions) < len(batch.decisions):
-        removed = [d.block_id for d in batch.decisions if d.block_id not in valid_ids]
-        logger.warning(
-            "Filtered %d out-of-scope structure decisions from chunk %s: %s",
-            len(removed),
-            chunk.chunk_id,
-            removed,
-        )
+    counts = Counter(d.block_id for d in batch.decisions)
+
+    good_decisions = []
+    for d in batch.decisions:
+        # Filter out if block_id not in valid chunk IDs
+        if d.block_id not in valid_ids:
+            logger.warning(
+                "Filtered out-of-scope structure decision for block %s in chunk %s",
+                d.block_id,
+                chunk.chunk_id,
+            )
+            continue
+        # Filter out if duplicate within same batch (treat duplicate as invalid/conflict)
+        if counts[d.block_id] > 1:
+            logger.warning(
+                "Filtered conflicting duplicate structure decision for block %s in chunk %s",
+                d.block_id,
+                chunk.chunk_id,
+            )
+            continue
+
+        # Sanitize out-of-scope paragraph_continuation_of
+        if d.paragraph_continuation_of and d.paragraph_continuation_of not in valid_ids:
+            logger.warning(
+                "Sanitizing out-of-scope continuation target %s on block %s in chunk %s",
+                d.paragraph_continuation_of,
+                d.block_id,
+                chunk.chunk_id,
+            )
+            d = d.model_copy(update={"paragraph_continuation_of": None})
+
+        good_decisions.append(d)
+
     return StructureDecisionBatch(
         schema_version=batch.schema_version,
         chunk_id=batch.chunk_id,
@@ -127,17 +210,42 @@ def filter_out_of_scope_semantic_decisions(
     batch: SemanticDecisionBatch,
     chunk: SemanticChunkInput,
 ) -> SemanticDecisionBatch:
-    """Return a new SemanticDecisionBatch with out-of-scope decisions removed."""
+    """Return a new SemanticDecisionBatch with filtered decisions."""
     valid_ids = _chunk_block_ids(chunk)
-    good_decisions = [d for d in batch.decisions if d.block_id in valid_ids]
-    if len(good_decisions) < len(batch.decisions):
-        removed = [d.block_id for d in batch.decisions if d.block_id not in valid_ids]
-        logger.warning(
-            "Filtered %d out-of-scope semantic decisions from chunk %s: %s",
-            len(removed),
-            chunk.chunk_id,
-            removed,
-        )
+    counts = Counter(d.block_id for d in batch.decisions)
+
+    good_decisions = []
+    for d in batch.decisions:
+        # Filter out if block_id not in valid chunk IDs
+        if d.block_id not in valid_ids:
+            logger.warning(
+                "Filtered out-of-scope semantic decision for block %s in chunk %s",
+                d.block_id,
+                chunk.chunk_id,
+            )
+            continue
+        # Filter out if duplicate within same batch
+        if counts[d.block_id] > 1:
+            logger.warning(
+                "Filtered conflicting duplicate semantic decision for block %s in chunk %s",
+                d.block_id,
+                chunk.chunk_id,
+            )
+            continue
+
+        # Sanitize related_block_ids: drop any out-of-scope IDs
+        if d.related_block_ids:
+            sanitized_rels = [r for r in d.related_block_ids if r in valid_ids]
+            if len(sanitized_rels) != len(d.related_block_ids):
+                logger.warning(
+                    "Sanitizing out-of-scope related_block_ids on block %s in chunk %s",
+                    d.block_id,
+                    chunk.chunk_id,
+                )
+                d = d.model_copy(update={"related_block_ids": sanitized_rels})
+
+        good_decisions.append(d)
+
     return SemanticDecisionBatch(
         schema_version=batch.schema_version,
         chunk_id=batch.chunk_id,

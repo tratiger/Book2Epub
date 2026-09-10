@@ -680,3 +680,488 @@ def test_audit_ir_final_target_invariant(tmp_path: Path) -> None:
             f"Audit final_target={audit_final!r} but IR is Table"
         )
 
+
+def test_visual_arbitration_wrong_block_id_rejected_and_preserved(tmp_path: Path) -> None:
+    """Critical 1: When visual response contains decisions for a DIFFERENT block_id
+    (0 matching decisions), it must NOT apply that decision; it must reject and preserve
+    original."""
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    Image.new("RGB", (600, 800), color="white").save(img_dir / "page_001.png")
+    visual_source = VisualSource(images_dir=img_dir)
+    paths = create_job_paths(tmp_path / "work")
+
+    table_block = Table(id="blk-real-1", html="<table><tr><td>real table</td></tr></table>")
+    bookir = BookIR(
+        metadata=BookMetadata(title="Test"),
+        source=SourceDocument(page_count=1),
+        blocks=[table_block],
+    )
+    evidence_book = SemanticEvidenceBook(
+        schema_version="1.0",
+        source_middle_sha256="dummy",
+        raw_bookir_sha256="dummy",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="blk-real-1",
+                page_idx=0,
+                bbox=[50.0, 50.0, 200.0, 200.0],
+                page_size=[600.0, 800.0],
+                allowed_targets=["keep", "keep_original", "terminal_output", "table"],
+                preformatted_text="real table",
+            )
+        ],
+    )
+    draft_book = SemanticDraftBook(
+        schema_version="1.0",
+        book_id="test",
+        blocks=[DraftBlock(block_id="blk-real-1", page_idx=0, current_type="table")],
+    )
+    m8_audit = SemanticAuditRecord(
+        decision_id="m8-wbid",
+        block_id="blk-real-1",
+        source_kind="table",
+        proposed_target="terminal_output",
+        final_target="table",
+        confidence=0.60,
+        status="queued_visual_review",
+        provider="mock-m8",
+        model="mock-m8",
+    )
+
+    # Provider returns decision for 'blk-WRONG-OTHER', NOT 'blk-real-1'
+    mock_vlm = MockVisualArbitrationProvider(
+        decisions=[
+            VisualSemanticDecision(
+                block_id="blk-WRONG-OTHER",
+                decision="confirm_proposed",
+                target="terminal_output",
+                confidence=0.99,
+                visual_evidence_codes=["MONOSPACE_VISUAL_STYLE"],
+                rationale="Wrong block decision",
+            )
+        ]
+    )
+
+    cfg = JobConfig(semantic=SemanticConfig(enabled=True, vision="auto"))
+
+    new_ir, updated_audits, _ = run_visual_arbitration(
+        bookir=bookir,
+        evidence=evidence_book,
+        draft=draft_book,
+        audits=[m8_audit],
+        cfg=cfg,
+        paths=paths,
+        visual_source=visual_source,
+        provider=mock_vlm,
+    )
+
+    # Must preserve original; must NOT apply blk-WRONG-OTHER's decision!
+    assert updated_audits[0].status == "preserved_original_conflict"
+    assert updated_audits[0].final_target == "table"
+    assert isinstance(new_ir.blocks[0], Table)
+
+
+def test_visual_arbitration_duplicate_block_id_rejected_as_conflict(tmp_path: Path) -> None:
+    """Critical 1: When visual response returns multiple decisions for the SAME block_id
+    (2+ matching decisions), it must reject as conflicting and preserve original."""
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    Image.new("RGB", (600, 800), color="white").save(img_dir / "page_001.png")
+    visual_source = VisualSource(images_dir=img_dir)
+    paths = create_job_paths(tmp_path / "work")
+
+    table_block = Table(id="blk-dup-1", html="<table><tr><td>content</td></tr></table>")
+    bookir = BookIR(
+        metadata=BookMetadata(title="Test"),
+        source=SourceDocument(page_count=1),
+        blocks=[table_block],
+    )
+    evidence_book = SemanticEvidenceBook(
+        schema_version="1.0",
+        source_middle_sha256="dummy",
+        raw_bookir_sha256="dummy",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="blk-dup-1",
+                page_idx=0,
+                bbox=[50.0, 50.0, 200.0, 200.0],
+                page_size=[600.0, 800.0],
+                allowed_targets=["keep", "keep_original", "terminal_output", "table"],
+                preformatted_text="content",
+            )
+        ],
+    )
+    draft_book = SemanticDraftBook(
+        schema_version="1.0",
+        book_id="test",
+        blocks=[DraftBlock(block_id="blk-dup-1", page_idx=0, current_type="table")],
+    )
+    m8_audit = SemanticAuditRecord(
+        decision_id="m8-dup",
+        block_id="blk-dup-1",
+        source_kind="table",
+        proposed_target="terminal_output",
+        final_target="table",
+        confidence=0.60,
+        status="queued_visual_review",
+        provider="mock-m8",
+        model="mock-m8",
+    )
+
+    # Provider returns 2 duplicate decisions for blk-dup-1
+    mock_vlm = MockVisualArbitrationProvider(
+        decisions=[
+            VisualSemanticDecision(
+                block_id="blk-dup-1",
+                decision="confirm_proposed",
+                target="terminal_output",
+                confidence=0.95,
+                visual_evidence_codes=[],
+                rationale="Vote A",
+            ),
+            VisualSemanticDecision(
+                block_id="blk-dup-1",
+                decision="reject_keep_original",
+                confidence=0.85,
+                visual_evidence_codes=[],
+                rationale="Vote B",
+            ),
+        ]
+    )
+
+    cfg = JobConfig(semantic=SemanticConfig(enabled=True, vision="auto"))
+
+    new_ir, updated_audits, _ = run_visual_arbitration(
+        bookir=bookir,
+        evidence=evidence_book,
+        draft=draft_book,
+        audits=[m8_audit],
+        cfg=cfg,
+        paths=paths,
+        visual_source=visual_source,
+        provider=mock_vlm,
+    )
+
+    assert updated_audits[0].status == "preserved_original_conflict"
+    assert updated_audits[0].final_target == "table"
+    assert isinstance(new_ir.blocks[0], Table)
+
+
+def test_visual_arbitration_m8_preformatted_alternate_updates_ir(tmp_path: Path) -> None:
+    """Critical 2: When a block was already converted to PreformattedBlock(terminal_output)
+    by M8, and M9 visual chooses alternate target 'shell_command', the IR node MUST
+    be updated to PreformattedBlock(subtype='shell_command')."""
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    Image.new("RGB", (600, 800), color="white").save(img_dir / "page_001.png")
+    visual_source = VisualSource(images_dir=img_dir)
+    paths = create_job_paths(tmp_path / "work")
+
+    # M8 applied: input to visual arbitration is ALREADY
+    # PreformattedBlock(subtype='terminal_output')
+    pre_block = PreformattedBlock(
+        id="blk-alt-pre",
+        subtype="terminal_output",
+        text="$ npm run build",
+    )
+    bookir = BookIR(
+        metadata=BookMetadata(title="Test Alt Pre"),
+        source=SourceDocument(page_count=1),
+        blocks=[pre_block],
+    )
+    raw_tbl = Table(
+        id="blk-alt-pre",
+        html="<table><tr><td>$ npm run build</td></tr></table>",
+    )
+    raw_ir = BookIR(
+        metadata=BookMetadata(title="Test Alt Pre"),
+        source=SourceDocument(page_count=1),
+        blocks=[raw_tbl],
+    )
+    evidence_book = SemanticEvidenceBook(
+        schema_version="1.0",
+        source_middle_sha256="dummy",
+        raw_bookir_sha256="dummy",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="blk-alt-pre",
+                page_idx=0,
+                bbox=[50.0, 50.0, 200.0, 200.0],
+                page_size=[600.0, 800.0],
+                allowed_targets=[
+                    "keep",
+                    "keep_original",
+                    "terminal_output",
+                    "shell_command",
+                    "table",
+                ],
+                preformatted_text="$ npm run build",
+                raw_bookir_kind="table",
+            )
+        ],
+    )
+    draft_book = SemanticDraftBook(
+        schema_version="1.0",
+        book_id="test",
+        blocks=[DraftBlock(block_id="blk-alt-pre", page_idx=0, current_type="preformatted")],
+    )
+    m8_audit = SemanticAuditRecord(
+        decision_id="pass-b-blk-alt-pre",
+        block_id="blk-alt-pre",
+        source_kind="table",
+        proposed_target="terminal_output",
+        final_target="terminal_output",
+        confidence=0.75,
+        status="applied",
+        provider="mock-m8",
+        model="mock-m8",
+    )
+
+    # M9 VLM chooses replace_with_alternate -> shell_command
+    mock_vlm = MockVisualArbitrationProvider(
+        decisions=[
+            VisualSemanticDecision(
+                block_id="blk-alt-pre",
+                decision="replace_with_alternate",
+                target="shell_command",
+                confidence=0.92,
+                visual_evidence_codes=["SHELL_PROMPT_VISIBLE"],
+                rationale="Single shell command, retyping to shell_command",
+            )
+        ]
+    )
+
+    cfg = JobConfig(semantic=SemanticConfig(enabled=True, vision="auto"))
+
+    new_ir, updated_audits, _ = run_visual_arbitration(
+        bookir=bookir,
+        evidence=evidence_book,
+        draft=draft_book,
+        audits=[m8_audit],
+        cfg=cfg,
+        paths=paths,
+        visual_source=visual_source,
+        provider=mock_vlm,
+        raw_ir=raw_ir,
+    )
+
+    assert updated_audits[0].final_target == "shell_command"
+    assert updated_audits[0].status == "visual_override_applied"
+    # IR block MUST be shell_command, NOT stuck at terminal_output!
+    assert isinstance(new_ir.blocks[0], PreformattedBlock)
+    assert new_ir.blocks[0].subtype == "shell_command"
+
+
+def test_visual_arbitration_revert_paragraph_heading_restores_paragraph(tmp_path: Path) -> None:
+    """Critical 3: When M8 Pass A promoted Paragraph -> Heading, and M9 rejects it,
+    the BookIR node MUST be reverted to Paragraph (not left as Heading)."""
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    Image.new("RGB", (600, 800), color="white").save(img_dir / "page_001.png")
+    visual_source = VisualSource(images_dir=img_dir)
+    paths = create_job_paths(tmp_path / "work")
+
+    from book2epub.ir.models import Heading as IRHeading
+    from book2epub.ir.models import Paragraph as IRParagraph
+    from book2epub.ir.models import Text as IRText
+
+    # M8 applied Heading H2
+    heading_block = IRHeading(
+        id="blk-h-rev",
+        level=2,
+        inlines=[IRText(text="Some normal text that was false-positive heading")],
+    )
+    bookir = BookIR(
+        metadata=BookMetadata(title="Test"),
+        source=SourceDocument(page_count=1),
+        blocks=[heading_block],
+    )
+    # Raw was Paragraph
+    raw_para = IRParagraph(
+        id="blk-h-rev",
+        inlines=[IRText(text="Some normal text that was false-positive heading")],
+    )
+    raw_ir = BookIR(
+        metadata=BookMetadata(title="Test"),
+        source=SourceDocument(page_count=1),
+        blocks=[raw_para],
+    )
+    evidence_book = SemanticEvidenceBook(
+        schema_version="1.0",
+        source_middle_sha256="dummy",
+        raw_bookir_sha256="dummy",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="blk-h-rev",
+                page_idx=0,
+                bbox=[50.0, 50.0, 200.0, 200.0],
+                page_size=[600.0, 800.0],
+                allowed_targets=["keep", "keep_original", "paragraph", "heading"],
+                plain_text="Some normal text that was false-positive heading",
+                raw_bookir_kind="paragraph",
+            )
+        ],
+    )
+    draft_book = SemanticDraftBook(
+        schema_version="1.0",
+        book_id="test",
+        blocks=[DraftBlock(block_id="blk-h-rev", page_idx=0, current_type="heading")],
+    )
+    m8_audit = SemanticAuditRecord(
+        decision_id="pass-a-blk-h-rev",
+        block_id="blk-h-rev",
+        source_kind="paragraph",
+        proposed_target="heading_h2",
+        final_target="heading_h2",
+        confidence=0.70,
+        status="applied",
+        provider="structure",
+        model="structure",
+    )
+
+    # M9 VLM rejects the heading promotion: keep original paragraph!
+    mock_vlm = MockVisualArbitrationProvider(
+        decisions=[
+            VisualSemanticDecision(
+                block_id="blk-h-rev",
+                decision="reject_keep_original",
+                confidence=0.93,
+                visual_evidence_codes=[],
+                rationale="Visual font size matches body text, not a heading",
+            )
+        ]
+    )
+
+    cfg = JobConfig(semantic=SemanticConfig(enabled=True, vision="auto"))
+
+    new_ir, updated_audits, _ = run_visual_arbitration(
+        bookir=bookir,
+        evidence=evidence_book,
+        draft=draft_book,
+        audits=[m8_audit],
+        cfg=cfg,
+        paths=paths,
+        visual_source=visual_source,
+        provider=mock_vlm,
+        raw_ir=raw_ir,
+    )
+
+    assert updated_audits[0].final_target == "paragraph"
+    assert updated_audits[0].status == "preserved_original_conflict"
+    # Critical: IR node must be Paragraph, NOT Heading!
+    assert isinstance(new_ir.blocks[0], IRParagraph)
+    assert not isinstance(new_ir.blocks[0], IRHeading)
+
+
+def test_visual_arbitration_revert_table_preserves_all_metadata(tmp_path: Path) -> None:
+    """High 4: When M8 applied Table->Preformatted and M9 rejects it,
+    the restored Table MUST preserve caption, footnotes, and fallback_asset_id completely."""
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    Image.new("RGB", (600, 800), color="white").save(img_dir / "page_001.png")
+    visual_source = VisualSource(images_dir=img_dir)
+    paths = create_job_paths(tmp_path / "work")
+
+    from book2epub.ir.models import Text as IRText
+
+    cap = [IRText(text="Table 4: Important data")]
+    fn = [IRText(text="Note: measured in ms")]
+
+    # Raw IR has full metadata on Table
+    raw_tbl = Table(
+        id="blk-tbl-meta",
+        html="<table><tr><th>Col1</th></tr><tr><td>Val</td></tr></table>",
+        caption=cap,
+        footnotes=fn,
+        fallback_asset_id="asset-123",
+    )
+    raw_ir = BookIR(
+        metadata=BookMetadata(title="Test Meta"),
+        source=SourceDocument(page_count=1),
+        blocks=[raw_tbl],
+    )
+    # M8 had applied PreformattedBlock
+    pre_blk = PreformattedBlock(
+        id="blk-tbl-meta",
+        subtype="terminal_output",
+        text="Col1\nVal",
+        caption=cap,
+        footnotes=fn,
+    )
+    bookir = BookIR(
+        metadata=BookMetadata(title="Test Meta"),
+        source=SourceDocument(page_count=1),
+        blocks=[pre_blk],
+    )
+    evidence_book = SemanticEvidenceBook(
+        schema_version="1.0",
+        source_middle_sha256="dummy",
+        raw_bookir_sha256="dummy",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="blk-tbl-meta",
+                page_idx=0,
+                bbox=[50.0, 50.0, 200.0, 200.0],
+                page_size=[600.0, 800.0],
+                allowed_targets=["keep", "keep_original", "terminal_output", "table"],
+                preformatted_text="Col1\nVal",
+                table_html="<table><tr><th>Col1</th></tr><tr><td>Val</td></tr></table>",
+                table_html_available=True,
+                raw_bookir_kind="table",
+            )
+        ],
+    )
+    draft_book = SemanticDraftBook(
+        schema_version="1.0",
+        book_id="test",
+        blocks=[DraftBlock(block_id="blk-tbl-meta", page_idx=0, current_type="preformatted")],
+    )
+    m8_audit = SemanticAuditRecord(
+        decision_id="pass-b-blk-tbl-meta",
+        block_id="blk-tbl-meta",
+        source_kind="table",
+        proposed_target="terminal_output",
+        final_target="terminal_output",
+        confidence=0.72,
+        status="applied",
+        provider="mock-m8",
+        model="mock-m8",
+    )
+
+    # M9 VLM rejects: it's a real table!
+    mock_vlm = MockVisualArbitrationProvider(
+        decisions=[
+            VisualSemanticDecision(
+                block_id="blk-tbl-meta",
+                decision="reject_keep_original",
+                confidence=0.95,
+                visual_evidence_codes=["TABLE_GRID_OR_COLUMNS_SEMANTIC"],
+                rationale="True table with header and grid lines",
+            )
+        ]
+    )
+
+    cfg = JobConfig(semantic=SemanticConfig(enabled=True, vision="auto"))
+
+    new_ir, updated_audits, _ = run_visual_arbitration(
+        bookir=bookir,
+        evidence=evidence_book,
+        draft=draft_book,
+        audits=[m8_audit],
+        cfg=cfg,
+        paths=paths,
+        visual_source=visual_source,
+        provider=mock_vlm,
+        raw_ir=raw_ir,
+    )
+
+    restored = new_ir.blocks[0]
+    assert isinstance(restored, Table)
+    # Metadata MUST NOT be lost!
+    assert len(restored.caption) == 1
+    assert restored.caption[0].text == "Table 4: Important data"  # type: ignore[attr-defined]
+    assert len(restored.footnotes) == 1
+    assert restored.footnotes[0].text == "Note: measured in ms"  # type: ignore[attr-defined]
+    assert restored.fallback_asset_id == "asset-123"
+

@@ -578,6 +578,29 @@ def apply_semantic_decisions(
             continue
 
         # ------------------------------------------------------------------ #
+        # 2b. preformatted -> alternate preformatted subtype                  #
+        # ------------------------------------------------------------------ #
+        if isinstance(blk, PreformattedBlock) and target in _PREFORMATTED_SUBTYPES:
+            new_blk = blk.model_copy(update={"subtype": target})
+            new_blocks.append(new_blk)
+            audits.append(
+                SemanticAuditRecord(
+                    decision_id=f"pass-b-{blk.id}",
+                    block_id=blk.id,
+                    source_kind=source_kind,
+                    proposed_target=target,
+                    final_target=target,
+                    confidence=dec.confidence,
+                    evidence_codes=dec.evidence_codes,
+                    provider="semantic",
+                    model="semantic",
+                    request_ids=dec.chunk_ids,
+                    status="applied",
+                    source_content_sha256=hash_before,
+                )
+            )
+            continue
+
         # 3. paragraph -> callout                                             #
         # ------------------------------------------------------------------ #
         if isinstance(blk, Paragraph) and (target.startswith("callout_") or target == "sidebar"):

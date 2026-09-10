@@ -276,6 +276,9 @@ def run_conversion_m2(
                     paths=paths,
                     visual_source=visual_source,
                     provider=vis_provider,
+                    raw_ir=raw_ir,
+                    struct_decisions=semantic_result.struct_decisions,
+                    semantic_decisions=semantic_result.semantic_decisions,
                 )
                 save_bookir(semantic_ir, paths.ir_semantic_json)
                 # Write authoritative final audit artifact (M9-updated).

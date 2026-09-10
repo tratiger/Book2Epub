@@ -3,18 +3,22 @@
 import logging
 
 from book2epub.config import JobConfig
-from book2epub.ir.models import BookIR
+from book2epub.ir.models import BookIR, Heading, Paragraph, Table
 from book2epub.paths import JobPaths
 from book2epub.providers.base import StructuredProvider
 from book2epub.providers.models import ImageInput, StructuredInferenceRequest
 from book2epub.semantic.apply import (
     apply_semantic_decisions,
+    apply_structure_decisions,
 )
 from book2epub.semantic.decisions import (
     SemanticAuditRecord,
 )
 from book2epub.semantic.models import SemanticDraftBook, SemanticEvidenceBook
-from book2epub.semantic.reconcile import ReconciledSemanticDecision
+from book2epub.semantic.reconcile import (
+    ReconciledSemanticDecision,
+    ReconciledStructureDecision,
+)
 from book2epub.semantic.schemas import build_provider_schema
 from book2epub.visual.crop import map_and_crop
 from book2epub.visual.models import VisualSemanticBatch
@@ -114,6 +118,9 @@ def run_visual_arbitration(
     paths: JobPaths,
     visual_source: VisualSource,
     provider: StructuredProvider,
+    raw_ir: BookIR | None = None,
+    struct_decisions: dict[str, ReconciledStructureDecision] | None = None,
+    semantic_decisions: dict[str, ReconciledSemanticDecision] | None = None,
 ) -> tuple[BookIR, list[SemanticAuditRecord], set[str]]:
     """
     Execute multimodal visual arbitration for triggered semantic blocks (M9 Section 7-8).
@@ -121,10 +128,17 @@ def run_visual_arbitration(
     Returns (updated_ir, updated_audits, ocr_recommended_block_ids).
 
     Invariant: final_target in updated_audits == kind of the corresponding IR node.
-    When M9 rejects a block that M8 had already applied (e.g. table->preformatted),
-    the BookIR node is reverted to source-kind representation before returning.
-    This is done by re-applying only the *non-rejected* visual decisions to the
-    semantic_ir, and re-building blocks that M9 rejected from the raw evidence.
+    When raw_ir is provided:
+      Re-materializes once cleanly: raw_ir + resolved Pass A + resolved Pass B -> final IR.
+      This ensures:
+      1. Reverts restore the authentic original block (Paragraph, Heading, Table) with all
+         metadata (caption, footnotes, layout_hint, etc.) intact.
+      2. M8 applied changes updated by M9 alternate (e.g. Table -> terminal -> shell_command)
+         materialize directly from the raw block to the alternate target.
+      3. Strict visual response scope:
+         0 decisions matching block_id -> preserve/reject
+         1 decision matching block_id -> use
+         2+ decisions matching block_id -> conflict/reject
     """
     if cfg.semantic.vision == "off" or not visual_source.has_visual:
         return bookir, audits, set()
@@ -138,7 +152,6 @@ def run_visual_arbitration(
     ocr_recommended_block_ids: set[str] = set()
     updated_audits: list[SemanticAuditRecord] = []
     override_decisions: dict[str, ReconciledSemanticDecision] = {}
-    # Track blocks that M9 rejected back to original; we need to restore them in IR
     revert_to_source_block_ids: set[str] = set()
 
     for audit in audits:
@@ -239,25 +252,57 @@ def run_visual_arbitration(
             continue
 
         # ------------------------------------------------------------------
-        # Scope validation: find the decision whose block_id matches audit.block_id.
-        # Do NOT blindly trust decisions[0].
+        # Scope validation on visual response:
+        # 0 matching decisions -> preserve/reject
+        # 1 matching decision  -> use
+        # 2+ matching decisions -> conflict/reject
         # ------------------------------------------------------------------
-        vis_dec = None
-        for candidate in batch.decisions:
-            if candidate.block_id == audit.block_id:
-                vis_dec = candidate
-                break
-
-        if vis_dec is None:
-            # No matching decision found — fall back to first if batch is non-empty,
-            # but log a warning. This handles providers that echo wrong block_id.
+        matching_decisions = [d for d in batch.decisions if d.block_id == audit.block_id]
+        if len(matching_decisions) == 0:
             logger.warning(
-                "Visual batch for block %s has no matching block_id decision "
-                "(got block_ids: %s). Falling back to decisions[0].",
+                "Visual response for block %s returned 0 matching decisions (got: %s). "
+                "Preserving original interpretation.",
                 audit.block_id,
                 [d.block_id for d in batch.decisions],
             )
-            vis_dec = batch.decisions[0]
+            updated_audit = audit.model_copy(
+                update={
+                    "final_target": audit.source_kind,
+                    "status": "preserved_original_conflict",
+                    "provider": f"{provider.name}-visual",
+                    "model": provider.model,
+                    "rejection_reason": f"No visual decision matching block_id {audit.block_id}",
+                }
+            )
+            updated_audits.append(updated_audit)
+            if audit.status == "applied":
+                revert_to_source_block_ids.add(audit.block_id)
+            continue
+
+        if len(matching_decisions) > 1:
+            logger.warning(
+                "Visual response for block %s returned %d duplicate decisions. "
+                "Rejecting as conflicting.",
+                audit.block_id,
+                len(matching_decisions),
+            )
+            updated_audit = audit.model_copy(
+                update={
+                    "final_target": audit.source_kind,
+                    "status": "preserved_original_conflict",
+                    "provider": f"{provider.name}-visual",
+                    "model": provider.model,
+                    "rejection_reason": (
+                        f"Multiple conflicting visual decisions for block_id {audit.block_id}"
+                    ),
+                }
+            )
+            updated_audits.append(updated_audit)
+            if audit.status == "applied":
+                revert_to_source_block_ids.add(audit.block_id)
+            continue
+
+        vis_dec = matching_decisions[0]
 
         if vis_dec.ocr_review_recommended:
             ocr_recommended_block_ids.add(audit.block_id)
@@ -265,7 +310,6 @@ def run_visual_arbitration(
         # ------------------------------------------------------------------
         # 4. Adjudication application logic (Appendix K5, M9 Section 8)
         # ------------------------------------------------------------------
-        # Determine chosen_target from the visual decision
         chosen_target = vis_dec.target or vis_dec.target_type or audit.proposed_target
         if vis_dec.decision == "reject_keep_original":
             chosen_target = audit.source_kind
@@ -284,13 +328,13 @@ def run_visual_arbitration(
         applied_status = audit.status
         final_target = audit.final_target
 
-        if vis_dec.confidence >= 0.85 and chosen_target in ev.allowed_targets:
+        if vis_dec.confidence >= 0.85 and (
+            chosen_target in ev.allowed_targets or chosen_target == audit.source_kind
+        ):
             if chosen_target == audit.source_kind:
-                # Visual says: keep original. If M8 had applied a change, we must revert.
                 applied_status = "preserved_original_conflict"
                 final_target = audit.source_kind
                 if audit.status == "applied":
-                    # M8 had applied a retype; M9 says revert — flag for IR restoration
                     revert_to_source_block_ids.add(audit.block_id)
             else:
                 applied_status = "visual_override_applied"
@@ -305,7 +349,6 @@ def run_visual_arbitration(
                     chunk_ids=[req.request_id],
                 )
         elif vis_dec.confidence < 0.85:
-            # Below confidence threshold: preserve source, revert if M8 had applied
             applied_status = "preserved_original_conflict"
             final_target = audit.source_kind
             if audit.status == "applied":
@@ -325,54 +368,117 @@ def run_visual_arbitration(
         )
         updated_audits.append(updated_audit)
 
-    # 5. Rebuild IR blocks so final IR state matches final audit state.
-    #    - Blocks in override_decisions: re-apply visual override target
-    #    - Blocks in revert_to_source_block_ids: restore original bookir block
-    #      (original meaning: the block as received, which is already in bookir since
-    #       M8 queued/conflicted blocks were NOT changed in bookir; but if M8 status
-    #       was "applied" we need the raw IR node — we use bookir.blocks from before
-    #       apply_semantic_decisions ran. Since we don't store that, we rebuild from
-    #       evidence. For Table->Preformatted reverts, we re-materialize the original
-    #       Table from evidence.table_html.)
-    #
-    # NOTE: bookir.blocks already contains the M8-applied state. We selectively
-    # reconstruct only blocks that need to change.
+    # ------------------------------------------------------------------
+    # 5. Re-materialize BookIR so final audit target == final IR node
+    # ------------------------------------------------------------------
+    if raw_ir is not None:
+        # Architecture: raw_ir + resolved Pass A + resolved Pass B -> materialize once
+        resolved_struct = dict(struct_decisions) if struct_decisions else {}
+        resolved_sem = dict(semantic_decisions) if semantic_decisions else {}
+
+        # Update decisions based on final visual review
+        for audit in updated_audits:
+            bid = audit.block_id
+            is_pass_a = (
+                audit.decision_id.startswith("pass-a")
+                or audit.provider.startswith("structure")
+                or (
+                    audit.source_kind in ("heading", "paragraph")
+                    and "heading" in audit.proposed_target
+                )
+            )
+            if is_pass_a:
+                if audit.status in ("applied", "visual_override_applied"):
+                    if audit.final_target.startswith("heading_h"):
+                        lvl = int(audit.final_target.replace("heading_h", ""))
+                        orig_st = resolved_struct.get(bid)
+                        resolved_struct[bid] = ReconciledStructureDecision(
+                            block_id=bid,
+                            is_heading=True,
+                            heading_level=lvl,
+                            paragraph_continuation_of=orig_st.paragraph_continuation_of
+                            if orig_st
+                            else None,
+                            confidence=audit.confidence,
+                            evidence_codes=audit.evidence_codes,
+                        )
+                    elif audit.final_target == "paragraph":
+                        resolved_struct[bid] = ReconciledStructureDecision(
+                            block_id=bid,
+                            is_heading=False,
+                            heading_level=None,
+                            paragraph_continuation_of=None,
+                            confidence=audit.confidence,
+                            evidence_codes=audit.evidence_codes,
+                        )
+                else:
+                    # Rejected or preserved original in Pass A -> do not apply structural change
+                    resolved_struct.pop(bid, None)
+            else:
+                # Pass B semantic decision
+                if audit.status in ("applied", "visual_override_applied"):
+                    orig_sem = resolved_sem.get(bid)
+                    resolved_sem[bid] = ReconciledSemanticDecision(
+                        block_id=bid,
+                        target=audit.final_target,
+                        heading_level=orig_sem.heading_level if orig_sem else None,
+                        confidence=audit.confidence,
+                        evidence_codes=audit.evidence_codes,
+                    )
+                else:
+                    # Rejected or preserved original in Pass B -> do not apply semantic change
+                    resolved_sem.pop(bid, None)
+
+        intermediate_blocks, _ = apply_structure_decisions(
+            blocks=raw_ir.blocks,
+            decisions=resolved_struct,
+            evidence_lookup=evidence_lookup,
+            auto_apply_threshold=0.0,
+            single_vote_threshold=0.0,
+        )
+        final_blocks, _ = apply_semantic_decisions(
+            blocks=intermediate_blocks,
+            decisions=resolved_sem,
+            evidence_lookup=evidence_lookup,
+            auto_apply_threshold=0.0,
+            single_vote_threshold=0.0,
+        )
+        updated_ir = raw_ir.model_copy(update={"blocks": final_blocks})
+        return updated_ir, updated_audits, ocr_recommended_block_ids
+
+    # Fallback when raw_ir is not provided (standalone unit tests)
     new_blocks = list(bookir.blocks)
 
     if revert_to_source_block_ids:
-        from book2epub.ir.models import Table as IRTable
-
         for i, blk in enumerate(new_blocks):
             if blk.id not in revert_to_source_block_ids:
                 continue
             ev2 = evidence_lookup.get(blk.id)
             if ev2 is None:
-                logger.error(
-                    "Cannot revert block %s to source kind: no evidence. "
-                    "Leaving as-is.",
-                    blk.id,
-                )
                 continue
             raw_kind = ev2.raw_bookir_kind
             if raw_kind == "table" and ev2.table_html:
-                # Restore as Table using evidence table_html
-                new_blocks[i] = IRTable(
+                new_blocks[i] = Table(
                     id=blk.id,
                     sources=blk.sources,
                     html=ev2.table_html,
+                    caption=list(getattr(blk, "caption", [])),
+                    footnotes=list(getattr(blk, "footnotes", [])),
+                    fallback_asset_id=getattr(blk, "fallback_asset_id", None),
+                    layout_hint=getattr(blk, "layout_hint", None),
                 )
-                logger.info(
-                    "M9 revert: restored block %s from %r back to table.",
-                    blk.id,
-                    blk.kind,
+            elif raw_kind == "paragraph" and isinstance(blk, Heading):
+                new_blocks[i] = Paragraph(
+                    id=blk.id,
+                    sources=blk.sources,
+                    inlines=list(blk.inlines),
                 )
-            else:
-                # For other raw kinds, we can only log; restoration requires raw_ir
-                logger.warning(
-                    "M9 revert: block %s raw_kind=%r has no restoration path "
-                    "(only table->preformatted revert is supported). Leaving as-is.",
-                    blk.id,
-                    raw_kind,
+            elif raw_kind == "heading" and isinstance(blk, Paragraph):
+                new_blocks[i] = Heading(
+                    id=blk.id,
+                    sources=blk.sources,
+                    level=1,
+                    inlines=list(blk.inlines),
                 )
 
     if override_decisions:

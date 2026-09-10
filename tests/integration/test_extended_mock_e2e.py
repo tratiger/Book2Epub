@@ -83,6 +83,8 @@ class ExtendedMockProvider:
 
         if response_model == StructureDecisionBatch:
             block_ids = re.findall(r'"block_id":\s*"([^"]+)"', request.user_text)
+            chunk_match = re.search(r"CHUNK_ID:\s*(\S+)", request.user_text)
+            chunk_id = chunk_match.group(1) if chunk_match else request.request_id
             decisions = []
             if len(block_ids) >= 1:
                 decisions.append(
@@ -108,7 +110,7 @@ class ExtendedMockProvider:
                 )
             batch = StructureDecisionBatch(
                 schema_version="1.0",
-                chunk_id=request.request_id,
+                chunk_id=chunk_id,
                 decisions=decisions,
             )
             res = StructuredInferenceResult(
@@ -157,9 +159,11 @@ class ExtendedMockProvider:
                         )
                     )
 
+            chunk_match = re.search(r"CHUNK_ID:\s*(\S+)", request.user_text)
+            chunk_id = chunk_match.group(1) if chunk_match else request.request_id
             batch = SemanticDecisionBatch(
                 schema_version="1.0",
-                chunk_id=request.request_id,
+                chunk_id=chunk_id,
                 decisions=decisions,
             )
             res = StructuredInferenceResult(
