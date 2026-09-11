@@ -335,8 +335,8 @@ def run_visual_arbitration(
         # 4. Semantic consistency check (decision enum authority)
         #
         # confirm_proposed:
-        #   -> target must equal audit.proposed_target (or be omitted).
-        #   -> target field differing indicates invalid/contradictory response.
+        #   -> target_type must equal audit.proposed_target (or be omitted).
+        #   -> target_type differing indicates invalid/contradictory response.
         # reject_keep_original:
         #   -> target is always audit.source_kind.
         # replace_with_alternate:
@@ -346,7 +346,7 @@ def run_visual_arbitration(
         #   -> target in allowed_targets.
         # ------------------------------------------------------------------
         dec_type = vis_dec.decision
-        raw_target = vis_dec.target or vis_dec.target_type
+        raw_target = vis_dec.target_type
 
         chosen_target: str | None = None
         invalid_reason: str | None = None
@@ -429,8 +429,7 @@ def run_visual_arbitration(
                     target=chosen_target,
                     heading_level=vis_dec.heading_level,
                     confidence=vis_dec.confidence,
-                    evidence_codes=[str(c) for c in vis_dec.visual_evidence_codes]
-                    + vis_dec.evidence_codes,
+                    evidence_codes=[str(c) for c in vis_dec.evidence_codes],
                     chunk_ids=[req.request_id],
                 )
         else:
@@ -447,7 +446,7 @@ def run_visual_arbitration(
                 "provider": f"{provider.name}-visual",
                 "model": provider.model,
                 "evidence_codes": audit.evidence_codes
-                + [str(c) for c in vis_dec.visual_evidence_codes],
+                + [str(c) for c in vis_dec.evidence_codes],
                 "rejection_reason": vis_dec.rationale,
             }
         )

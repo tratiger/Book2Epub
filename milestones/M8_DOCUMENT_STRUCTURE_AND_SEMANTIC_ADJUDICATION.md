@@ -289,6 +289,7 @@ schema_version
 chunk_id
 decisions: list[SemanticBlockDecision]
 relations: list[SemanticRelationDecision]
+observations: list[BookStateObservationBatch]
 ```
 
 ### `SemanticBlockDecision`

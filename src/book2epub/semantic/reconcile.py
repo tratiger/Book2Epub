@@ -3,8 +3,8 @@
 from dataclasses import dataclass, field
 
 from book2epub.semantic.decisions import (
+    SemanticBlockDecision,
     SemanticConflict,
-    SemanticDecision,
     SemanticDecisionBatch,
 )
 from book2epub.semantic.structure import (
@@ -156,7 +156,7 @@ def reconcile_semantic_batches(
     """
     Reconcile Pass B SemanticDecisions across overlapping chunks.
     """
-    grouped: dict[str, list[tuple[str, SemanticDecision]]] = {}
+    grouped: dict[str, list[tuple[str, SemanticBlockDecision]]] = {}
     for batch in batches:
         for dec in batch.decisions:
             grouped.setdefault(dec.block_id, []).append((batch.chunk_id, dec))
@@ -169,6 +169,10 @@ def reconcile_semantic_batches(
         chunk_ids = [cp[0] for cp in dec_pairs]
         decisions = [cp[1] for cp in dec_pairs]
 
+        def codes(decision: SemanticBlockDecision) -> list[str]:
+            legacy_codes = getattr(decision, "_legacy_evidence_codes", [])
+            return list(legacy_codes or decision.evidence_codes)
+
         if len(decisions) == 1:
             dec = decisions[0]
             is_single_vote = block_id in overlap_ids and len(batches) > 1
@@ -177,7 +181,7 @@ def reconcile_semantic_batches(
                 target=dec.target,
                 heading_level=dec.heading_level,
                 confidence=dec.confidence,
-                evidence_codes=list(dec.evidence_codes),
+                evidence_codes=codes(dec),
                 rationales=[dec.rationale] if dec.rationale else [],
                 chunk_ids=chunk_ids,
                 single_vote=is_single_vote,
@@ -223,7 +227,7 @@ def reconcile_semantic_batches(
             mean_conf = round(sum(d.confidence for d in decisions) / len(decisions), 3)
             all_codes: set[str] = set()
             for d in decisions:
-                all_codes.update(d.evidence_codes)
+                all_codes.update(codes(d))
             all_rats = [d.rationale for d in decisions if d.rationale]
 
             reconciled[block_id] = ReconciledSemanticDecision(

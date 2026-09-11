@@ -36,6 +36,7 @@ from book2epub.semantic.decisions import (
 )
 from book2epub.semantic.hashing import compute_text_sha256
 from book2epub.semantic.models import (
+    SEMANTIC_DECISION_SCHEMA_VERSION,
     SemanticDraftBook,
     SemanticEvidenceBook,
 )
@@ -96,6 +97,7 @@ def _semantic_cache_key(
         },
         observation_contract={
             "schema_version": "1.0",
+            "semantic_decision_schema_version": SEMANTIC_DECISION_SCHEMA_VERSION,
             "schema_hash": compute_text_sha256(
                 json.dumps(
                     build_provider_schema(BookStateObservationBatch),
@@ -459,7 +461,6 @@ def run_semantic_reconstruction(
                 exc,
             )
             batch_b = SemanticDecisionBatch(
-                schema_version="1.0",
                 chunk_id=chunk.chunk_id,
                 decisions=[],
             )

@@ -12,8 +12,8 @@ Instructions:
 2. If there is an unambiguous OCR error (such as a glyph substitution 'l' vs '1', 'rn' vs 'm',
    missing or extra character), propose the exact corrected text.
 3. If the OCR text accurately reflects the image, or if the visual evidence is blurry or
-   ambiguous, do NOT alter the text. Set proposed_text to null and visible_error_type to
-   "no_clear_error".
+   ambiguous, do NOT alter the text. Set proposed_text to an empty string and reason_code to
+   "OTHER_VISUALLY_CLEAR".
 4. Never generate arbitrary prose or rewrite sentences. Only correct genuine OCR errors.
 5. In your proposal, you must echo the exact block_id, segment_id, and old_text_sha256 provided
    in the prompt for identity binding.
@@ -71,4 +71,3 @@ Transcribe the exact printed text visible in the attached image crop:
 Block ID: {block_id}
 Segment ID: {segment_id}
 """
-

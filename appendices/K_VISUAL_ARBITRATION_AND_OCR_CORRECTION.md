@@ -65,12 +65,18 @@ Clamp all coordinates.
 class VisualSemanticDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     block_id: str
-    target: SemanticTarget
+    decision: Literal[
+        "confirm_proposed",
+        "reject_keep_original",
+        "replace_with_alternate",
+    ]
+    target_type: SemanticTarget | None = None
+    subtype: str | None = None
     heading_level: int | None = Field(default=None, ge=1, le=6)
     confidence: float = Field(ge=0, le=1)
-    visual_evidence_codes: list[VisualEvidenceCode]
-    confirms_text_decision: bool
-    rationale: str = Field(max_length=240)
+    evidence_codes: list[VisualEvidenceCode] = Field(default_factory=list)
+    rationale: str = Field(default="", max_length=240)
+    ocr_review_recommended: bool = False
 
 VisualEvidenceCode = Literal[
     "MONOSPACE_VISUAL_STYLE",
@@ -115,7 +121,7 @@ Review all changed semantic blocks plus all auto triggers. Do not review untouch
 
 - visual decision must choose from existing allowed_targets;
 - content hash must still match;
-- visual confidence >=0.80 required for a change;
+- `replace_with_alternate` requires visual confidence >=0.85;
 - if text decision and visual decision conflict and neither is >=0.90, preserve original;
 - if visual decision >=0.90 with clear evidence code and source validator passes, it may override an M8 text decision;
 - every override records both decisions;
@@ -201,19 +207,22 @@ class OCRCorrectionProposal(BaseModel):
     model_config = ConfigDict(extra="forbid")
     block_id: str
     segment_id: str
+    line_index: int | None = None
+    span_index: int | None = None
     old_text_sha256: str
-    proposed_text: str | None
+    proposed_text: str
     confidence: float = Field(ge=0, le=1)
-    visible_error_type: Literal[
-        "character_substitution",
-        "missing_character",
-        "extra_character",
-        "spacing_inside_segment",
-        "punctuation",
-        "case",
-        "no_clear_error",
+    reason_code: Literal[
+        "GLYPH_CONFUSION",
+        "MISSING_CHARACTER",
+        "EXTRA_CHARACTER",
+        "BROKEN_WORD",
+        "BROKEN_JAPANESE_TOKEN",
+        "CODE_IDENTIFIER_GLYPH",
+        "PUNCTUATION_GLYPH",
+        "OTHER_VISUALLY_CLEAR",
     ]
-    rationale: str = Field(max_length=200)
+    visually_verified: bool
 
 class OCRCorrectionBatch(BaseModel):
     schema_version: Literal["1.0"]

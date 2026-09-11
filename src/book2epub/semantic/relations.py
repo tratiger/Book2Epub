@@ -1,32 +1,10 @@
 """Semantic relationships between blocks: captions, footnotes,
 continuations, and groups (M8 Section 12)."""
 
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field
-
 from book2epub.ir.models import Block, CodeBlock, Figure, Paragraph, PreformattedBlock, Table
+from book2epub.semantic.decisions import RelationType, SemanticRelationDecision
 
-RelationType = Literal[
-    "caption_of",
-    "footnote_of",
-    "paragraph_continuation",
-    "member_of_callout",
-    "member_of_example",
-]
-
-
-class SemanticRelationDecision(BaseModel):
-    """Semantic relation decision connecting multiple blocks."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    relation_type: RelationType
-    source_block_ids: list[str]
-    target_block_id: str | None = None
-    confidence: float = Field(ge=0.0, le=1.0)
-    evidence_codes: list[str] = Field(default_factory=list)
-    rationale: str = Field(default="", max_length=240)
+__all__ = ["RelationType", "SemanticRelationDecision", "validate_relation"]
 
 
 def validate_relation(

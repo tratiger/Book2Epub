@@ -1,8 +1,8 @@
 """Data models for visual semantic arbitration and OCR correction (M9 & Appendix K)."""
 
-from typing import Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from book2epub.semantic.models import SemanticTarget
 
@@ -32,34 +32,65 @@ class VisualSemanticDecision(BaseModel):
     decision: Literal["confirm_proposed", "reject_keep_original", "replace_with_alternate"] = (
         "confirm_proposed"
     )
-    target: SemanticTarget | None = None
-    target_type: str | None = None
+    target_type: SemanticTarget | None = None
     subtype: str | None = None
     heading_level: int | None = Field(default=None, ge=1, le=6)
     confidence: float = Field(ge=0.0, le=1.0)
-    visual_evidence_codes: list[VisualEvidenceCode] = Field(default_factory=list)
-    evidence_codes: list[str] = Field(default_factory=list)
-    confirms_text_decision: bool = True
-    rationale: str = Field(max_length=240)
+    evidence_codes: list[VisualEvidenceCode] = Field(default_factory=list)
+    rationale: str = Field(default="", max_length=240)
     ocr_review_recommended: bool = False
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Self:
+        if isinstance(obj, dict) and any(
+            key in obj for key in ("target", "visual_evidence_codes", "confirms_text_decision")
+        ):
+            obj = {**obj, "__legacy_provider_field_rejected__": True}
+        return super().model_validate(obj, **kwargs)
+
+    def __init__(self, **data: object) -> None:
+        """Accept old in-memory fixtures without exposing old fields to providers."""
+        if "target_type" not in data and "target" in data:
+            data["target_type"] = data.pop("target")
+        if "evidence_codes" not in data and "visual_evidence_codes" in data:
+            data["evidence_codes"] = data.pop("visual_evidence_codes")
+        # This field was redundant with the decision enum and is ignored only for
+        # legacy in-memory callers. Dict/provider validation remains extra-forbid.
+        data.pop("confirms_text_decision", None)
+        super().__init__(**data)
+
+    @property
+    def target(self) -> SemanticTarget | None:
+        """Compatibility view for the existing visual arbitration application."""
+        return self.target_type
+
+    @property
+    def visual_evidence_codes(self) -> list[VisualEvidenceCode]:
+        """Compatibility view for pre-1.1 in-memory callers."""
+        return self.evidence_codes
 
 
 class VisualSemanticBatch(BaseModel):
     """Batch container for visual semantic decisions."""
 
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: Literal["1.0"] = "1.0"
     decisions: list[VisualSemanticDecision]
 
-
-VisibleErrorType = Literal[
-    "character_substitution",
-    "missing_character",
-    "extra_character",
-    "spacing_inside_segment",
-    "punctuation",
-    "case",
-    "no_clear_error",
-]
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_decision_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict) and any(
+            isinstance(item, dict)
+            and any(
+                key in item
+                for key in ("target", "visual_evidence_codes", "confirms_text_decision")
+            )
+            for item in data.get("decisions", [])
+        ):
+            raise ValueError("legacy visual response fields are not accepted")
+        return data
 
 
 class OCRCorrectionProposal(BaseModel):
@@ -72,18 +103,83 @@ class OCRCorrectionProposal(BaseModel):
 
     block_id: str
     segment_id: str
+    line_index: int | None = None
+    span_index: int | None = None
     old_text_sha256: str
-    proposed_text: str | None = None
+    proposed_text: str
     confidence: float = Field(ge=0.0, le=1.0)
-    visible_error_type: VisibleErrorType = "character_substitution"
-    rationale: str = Field(max_length=200)
+    reason_code: Literal[
+        "GLYPH_CONFUSION",
+        "MISSING_CHARACTER",
+        "EXTRA_CHARACTER",
+        "BROKEN_WORD",
+        "BROKEN_JAPANESE_TOKEN",
+        "CODE_IDENTIFIER_GLYPH",
+        "PUNCTUATION_GLYPH",
+        "OTHER_VISUALLY_CLEAR",
+    ]
+    visually_verified: bool
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Self:
+        if isinstance(obj, dict) and "visible_error_type" in obj:
+            obj = {**obj, "__legacy_provider_field_rejected__": True}
+        return super().model_validate(obj, **kwargs)
+
+    def __init__(self, **data: object) -> None:
+        """Keep old test/provider fixtures usable without widening provider JSON."""
+        if "reason_code" not in data and "visible_error_type" in data:
+            legacy_reason = str(data.pop("visible_error_type"))
+            data["reason_code"] = {
+                "character_substitution": "GLYPH_CONFUSION",
+                "character_confusion": "GLYPH_CONFUSION",
+                "missing_character": "MISSING_CHARACTER",
+                "extra_character": "EXTRA_CHARACTER",
+                "spacing_inside_segment": "BROKEN_WORD",
+                "punctuation": "PUNCTUATION_GLYPH",
+                "case": "GLYPH_CONFUSION",
+                "no_clear_error": "OTHER_VISUALLY_CLEAR",
+            }.get(legacy_reason, legacy_reason)
+        if "visually_verified" not in data:
+            data["visually_verified"] = True
+        if data.get("proposed_text") is None:
+            data["proposed_text"] = ""
+        # Rationale was not part of the canonical OCR proposal contract.
+        data.pop("rationale", None)
+        super().__init__(**data)
+
+    @property
+    def visible_error_type(self) -> str:
+        """Compatibility view for audit/application code using the old name."""
+        return {
+            "GLYPH_CONFUSION": "character_substitution",
+            "MISSING_CHARACTER": "missing_character",
+            "EXTRA_CHARACTER": "extra_character",
+            "BROKEN_WORD": "spacing_inside_segment",
+            "BROKEN_JAPANESE_TOKEN": "spacing_inside_segment",
+            "CODE_IDENTIFIER_GLYPH": "character_substitution",
+            "PUNCTUATION_GLYPH": "punctuation",
+            "OTHER_VISUALLY_CLEAR": "no_clear_error",
+        }[self.reason_code]
 
 
 class OCRCorrectionBatch(BaseModel):
     """Batch of OCR correction proposals."""
 
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: Literal["1.0"] = "1.0"
     proposals: list[OCRCorrectionProposal]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_legacy_proposal_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict) and any(
+            isinstance(item, dict) and "visible_error_type" in item
+            for item in data.get("proposals", [])
+        ):
+            raise ValueError("legacy OCR response fields are not accepted")
+        return data
 
 
 class OCRSensitiveConfirmation(BaseModel):
@@ -175,4 +271,3 @@ class OCRCorrectionAuditFile(BaseModel):
     total_codepoints: int = 0
     changed_codepoints: int = 0
     audits: list[OCRAuditRecord] = Field(default_factory=list)
-

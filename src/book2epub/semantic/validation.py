@@ -246,7 +246,8 @@ def filter_out_of_scope_semantic_decisions(
                     d.block_id,
                     chunk.chunk_id,
                 )
-                d = d.model_copy(update={"related_block_ids": sanitized_rels})
+                d = d.model_copy()
+                d._legacy_related_block_ids = sanitized_rels
 
         good_decisions.append(d)
 
@@ -254,6 +255,7 @@ def filter_out_of_scope_semantic_decisions(
         schema_version=batch.schema_version,
         chunk_id=batch.chunk_id,
         decisions=good_decisions,
+        relations=batch.relations,
         observations=batch.observations,
     )
 
