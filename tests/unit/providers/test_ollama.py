@@ -2,6 +2,7 @@
 
 import json
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -73,7 +74,7 @@ def test_ollama_infer_success(mock_init: MagicMock) -> None:
             {"role": "user", "content": "Classify this text."},
         ],
         format=schema,
-        options={"temperature": 0},
+        options={"temperature": 0, "num_predict": 8192},
         stream=False,
     )
 
@@ -143,3 +144,86 @@ def test_ollama_infer_transient_retry(mock_init: MagicMock) -> None:
 
     assert validated.status == "retry_ok"
     assert mock_client.chat.call_count == 2
+
+
+@patch("book2epub.providers.ollama.OllamaProvider.__init__", return_value=None)
+def test_ollama_length_truncation_skips_schema_retry(mock_init: MagicMock) -> None:
+    provider = OllamaProvider(model="qwen3-vl:8b-instruct")
+    provider.model = "qwen3-vl:8b-instruct"
+    provider.name = "ollama"
+    provider._client = MagicMock()
+    provider._client.chat.return_value = {
+        "message": {"content": '{"status":"incomplete"'},
+        "done_reason": "length",
+        "prompt_eval_count": 321,
+        "eval_count": 4096,
+    }
+    req = StructuredInferenceRequest(
+        request_id="req-length",
+        system_instruction="sys",
+        user_text="user",
+        response_model_name="SampleResponse",
+        response_schema=build_provider_schema(SampleResponse),
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        provider.infer(req, SampleResponse)
+
+    assert provider._client.chat.call_count == 1
+    assert exc_info.value.details["error_type"] == "structured_output_truncated"
+    assert exc_info.value.details["done_reason"] == "length"
+    assert exc_info.value.details["prompt_eval_count"] == 321
+    assert exc_info.value.details["eval_count"] == 4096
+    assert exc_info.value.details["raw_response_chars"] > 0
+
+
+@patch("book2epub.providers.ollama.OllamaProvider.__init__", return_value=None)
+def test_ollama_stop_malformed_json_retries_once(mock_init: MagicMock) -> None:
+    provider = OllamaProvider(model="llama3.3")
+    provider.model = "llama3.3"
+    provider.name = "ollama"
+    provider._client = MagicMock()
+    provider._client.chat.side_effect = [
+        SimpleNamespace(message=SimpleNamespace(content='{"status":"bad"')),
+        SimpleNamespace(
+            message=SimpleNamespace(content=json.dumps({"status": "ok", "code": 200})),
+            done_reason="stop",
+        ),
+    ]
+    req = StructuredInferenceRequest(
+        request_id="req-malformed",
+        system_instruction="sys",
+        user_text="user",
+        response_model_name="SampleResponse",
+        response_schema=build_provider_schema(SampleResponse),
+    )
+
+    validated, result = provider.infer(req, SampleResponse)
+
+    assert validated.status == "ok"
+    assert result.schema_retry_count == 1
+    assert result.request_id == "req-malformed-schema-retry"
+    assert provider._client.chat.call_count == 2
+
+
+@patch("book2epub.providers.ollama.OllamaProvider.__init__", return_value=None)
+def test_ollama_schema_mismatch_is_classified_after_one_retry(mock_init: MagicMock) -> None:
+    provider = OllamaProvider(model="llama3.3")
+    provider.model = "llama3.3"
+    provider.name = "ollama"
+    provider._client = MagicMock()
+    bad = {"message": {"content": json.dumps({"status": "bad", "code": 200, "x": 1})}}
+    provider._client.chat.return_value = bad
+    req = StructuredInferenceRequest(
+        request_id="req-schema",
+        system_instruction="sys",
+        user_text="user",
+        response_model_name="SampleResponse",
+        response_schema=build_provider_schema(SampleResponse),
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        provider.infer(req, SampleResponse)
+
+    assert provider._client.chat.call_count == 2
+    assert exc_info.value.details["error_type"] == "structured_output_schema_mismatch"

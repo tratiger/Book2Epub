@@ -187,6 +187,18 @@ def convert(
             help="Visual review policy: off, auto, on (always aliases on).",
         ),
     ] = "auto",
+    semantic_max_chunk_chars: Annotated[
+        int | None,
+        typer.Option("--semantic-max-chunk-chars", help="Maximum semantic chunk characters."),
+    ] = None,
+    semantic_max_chunk_blocks: Annotated[
+        int | None,
+        typer.Option("--semantic-max-chunk-blocks", help="Maximum semantic chunk blocks."),
+    ] = None,
+    semantic_overlap_blocks: Annotated[
+        int | None,
+        typer.Option("--semantic-overlap-blocks", help="Semantic context overlap blocks."),
+    ] = None,
     allow_cloud: Annotated[
         bool,
         typer.Option("--allow-cloud", help="Allow external cloud provider API calls."),
@@ -260,6 +272,21 @@ def convert(
         model=semantic_model,
         allow_cloud=allow_cloud,
         vision=normalize_vision_alias(semantic_vision),
+        **(
+            {"max_chunk_chars": semantic_max_chunk_chars}
+            if semantic_max_chunk_chars is not None
+            else {}
+        ),
+        **(
+            {"max_chunk_blocks": semantic_max_chunk_blocks}
+            if semantic_max_chunk_blocks is not None
+            else {}
+        ),
+        **(
+            {"overlap_blocks": semantic_overlap_blocks}
+            if semantic_overlap_blocks is not None
+            else {}
+        ),
     )
     ocr_cfg = OCRCorrectionConfig(
         mode=ocr_correction,  # type: ignore[arg-type]
@@ -390,6 +417,18 @@ def from_middle(
             help="Visual review policy: off, auto, on (always aliases on).",
         ),
     ] = "auto",
+    semantic_max_chunk_chars: Annotated[
+        int | None,
+        typer.Option("--semantic-max-chunk-chars", help="Maximum semantic chunk characters."),
+    ] = None,
+    semantic_max_chunk_blocks: Annotated[
+        int | None,
+        typer.Option("--semantic-max-chunk-blocks", help="Maximum semantic chunk blocks."),
+    ] = None,
+    semantic_overlap_blocks: Annotated[
+        int | None,
+        typer.Option("--semantic-overlap-blocks", help="Semantic context overlap blocks."),
+    ] = None,
     allow_cloud: Annotated[
         bool,
         typer.Option("--allow-cloud", help="Allow external cloud provider API calls."),
@@ -445,6 +484,21 @@ def from_middle(
         model=semantic_model,
         allow_cloud=allow_cloud,
         vision=normalize_vision_alias(semantic_vision),
+        **(
+            {"max_chunk_chars": semantic_max_chunk_chars}
+            if semantic_max_chunk_chars is not None
+            else {}
+        ),
+        **(
+            {"max_chunk_blocks": semantic_max_chunk_blocks}
+            if semantic_max_chunk_blocks is not None
+            else {}
+        ),
+        **(
+            {"overlap_blocks": semantic_overlap_blocks}
+            if semantic_overlap_blocks is not None
+            else {}
+        ),
     )
     ocr_cfg = OCRCorrectionConfig(
         mode=ocr_correction,  # type: ignore[arg-type]

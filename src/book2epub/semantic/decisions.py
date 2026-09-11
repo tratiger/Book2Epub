@@ -118,7 +118,7 @@ class SemanticRelationDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     relation_type: RelationType
-    source_block_ids: list[str]
+    source_block_ids: list[str] = Field(..., min_length=1, max_length=512)
     target_block_id: str | None = None
     confidence: float = Field(ge=0.0, le=1.0)
     evidence_codes: list[SemanticEvidenceCode] = Field(default_factory=list)
@@ -132,10 +132,11 @@ class SemanticDecisionBatch(BaseModel):
 
     schema_version: Literal["1.1"] = "1.1"
     chunk_id: str
-    decisions: list[SemanticBlockDecision] = Field(default_factory=list)
-    relations: list[SemanticRelationDecision] = Field(default_factory=list)
+    decisions: list[SemanticBlockDecision] = Field(default_factory=list, max_length=256)
+    relations: list[SemanticRelationDecision] = Field(default_factory=list, max_length=512)
     observations: list[BookStateObservationBatch] = Field(
         default_factory=list,
+        max_length=1,
         description=(
             "Optional BookStateObservationBatch from this chunk. "
             "Validated and merged into running BookState before the next chunk."

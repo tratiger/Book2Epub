@@ -82,4 +82,53 @@ def adapt_provider_schema(schema: dict[str, Any], provider: str) -> dict[str, An
     adapted = deepcopy(schema)
     if provider == "anthropic":
         return _strip_anthropic_unsupported_keywords(adapted)
+    if provider == "ollama":
+        # Ollama accepts ordinary JSON Schema.  The canonical schema is made
+        # strict for providers such as OpenAI, which makes every nullable field
+        # required.  Keeping those nullable fields optional materially reduces
+        # local-model output without weakening additionalProperties or local
+        # Pydantic validation.
+        _relax_nullable_required_fields(adapted)
     return adapted
+
+
+def _schema_allows_null(schema: dict[str, Any]) -> bool:
+    if schema.get("type") == "null":
+        return True
+    any_of = schema.get("anyOf") or schema.get("oneOf") or []
+    return any(isinstance(item, dict) and _schema_allows_null(item) for item in any_of)
+
+
+def _relax_nullable_required_fields(schema: dict[str, Any]) -> None:
+    """Preserve canonical constraints while relaxing nullable fields for Ollama."""
+    if schema.get("type") == "object" or "properties" in schema:
+        properties = schema.get("properties", {})
+        required = schema.get("required")
+        if isinstance(required, list):
+            schema["required"] = [
+                name
+                for name in required
+                if not (
+                    isinstance(properties.get(name), dict)
+                    and _schema_allows_null(properties[name])
+                )
+            ]
+        for child in properties.values():
+            if isinstance(child, dict):
+                _relax_nullable_required_fields(child)
+    for key in ("items", "additionalProperties"):
+        child = schema.get(key)
+        if isinstance(child, dict):
+            _relax_nullable_required_fields(child)
+    for key in ("$defs", "definitions"):
+        definitions = schema.get(key)
+        if isinstance(definitions, dict):
+            for child in definitions.values():
+                if isinstance(child, dict):
+                    _relax_nullable_required_fields(child)
+    for key in ("anyOf", "oneOf", "allOf"):
+        children = schema.get(key)
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    _relax_nullable_required_fields(child)

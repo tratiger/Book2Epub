@@ -16,6 +16,7 @@ from book2epub.semantic.book_state import (
 )
 from book2epub.semantic.chunking import SemanticChunkInput
 from book2epub.semantic.decisions import (
+    SemanticBlockDecision,
     SemanticDecision,
     SemanticDecisionBatch,
     SemanticRelationDecision,
@@ -555,3 +556,22 @@ def test_relation_scope_rejects_unknown_source_and_target() -> None:
     assert any("blk-foreign" in violation for violation in violations)
     filtered = filter_out_of_scope_semantic_decisions(batch, chunk)
     assert filtered.relations == []
+
+
+def test_semantic_cardinality_is_bounded_by_chunk_scope() -> None:
+    chunk = _make_chunk("sem-cardinality", ["blk-1", "blk-2"])
+    batch = SemanticDecisionBatch(
+        chunk_id=chunk.chunk_id,
+        decisions=[
+            SemanticBlockDecision(
+                block_id="blk-1",
+                operation="keep",
+                confidence=0.9,
+            )
+            for _ in range(3)
+        ],
+    )
+
+    violations = validate_semantic_batch_scope(batch, chunk)
+
+    assert any("exceeds chunk scope cardinality" in violation for violation in violations)

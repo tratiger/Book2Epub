@@ -39,6 +39,14 @@ class ProviderUsage(BaseModel):
     total_output_tokens: int | None = None
     attempt_count: int = 1
     schema_retry_count: int = 0
+    done_reason: str | None = None
+    prompt_eval_count: int | None = None
+    eval_count: int | None = None
+    total_duration: int | None = None
+    load_duration: int | None = None
+    prompt_eval_duration: int | None = None
+    eval_duration: int | None = None
+    response_chars: int | None = None
 
 
 class StructuredInferenceResult(BaseModel):
@@ -55,6 +63,8 @@ class StructuredInferenceResult(BaseModel):
     transport_attempt_count: int = 1
     schema_retry_count: int = 0
     provider_request_ids: list[str] = Field(default_factory=list)
+    done_reason: str | None = None
+    response_chars: int = 0
 
 
 class ProviderUsageRecord(BaseModel):

@@ -40,7 +40,7 @@ class StructureDecisionBatch(BaseModel):
 
     schema_version: Literal["1.0"] = "1.0"
     chunk_id: str
-    decisions: list[StructureDecision] = Field(default_factory=list)
+    decisions: list[StructureDecision] = Field(default_factory=list, max_length=256)
 
 
 class OutlineNode(BaseModel):

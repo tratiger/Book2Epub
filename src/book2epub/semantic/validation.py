@@ -67,6 +67,12 @@ def validate_structure_batch_scope(
 
     valid_ids = _chunk_block_ids(chunk)
 
+    if len(batch.decisions) > len(valid_ids):
+        violations.append(
+            f"StructureDecisionBatch decisions exceeds chunk scope cardinality: "
+            f"{len(batch.decisions)} > {len(valid_ids)}"
+        )
+
     # 2. Check for duplicate block_ids in the same batch
     counts = Counter(d.block_id for d in batch.decisions)
     for bid, count in counts.items():
@@ -130,6 +136,22 @@ def validate_semantic_batch_scope(
         raise ScopeValidationError(msg)
 
     valid_ids = _chunk_block_ids(chunk)
+
+    if len(batch.decisions) > len(valid_ids):
+        violations.append(
+            f"SemanticDecisionBatch decisions exceeds chunk scope cardinality: "
+            f"{len(batch.decisions)} > {len(valid_ids)}"
+        )
+    if len(batch.relations) > max(1, 2 * len(valid_ids)):
+        violations.append(
+            f"SemanticDecisionBatch relations exceeds bounded cardinality: "
+            f"{len(batch.relations)} > {max(1, 2 * len(valid_ids))}"
+        )
+    if len(batch.observations) > 1:
+        violations.append(
+            "SemanticDecisionBatch observations exceeds bounded cardinality: "
+            f"{len(batch.observations)} > 1"
+        )
 
     # 2. Check for duplicate block_ids in the same batch
     counts = Counter(d.block_id for d in batch.decisions)

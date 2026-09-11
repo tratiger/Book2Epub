@@ -62,6 +62,11 @@ from book2epub.semantic.relations import (
     validate_relation,
     validate_unique_block_ids,
 )
+from book2epub.semantic.request_schema import (
+    REQUEST_SCOPED_SCHEMA_CONTRACT_VERSION,
+    build_request_scoped_schema,
+    semantic_output_token_budget,
+)
 from book2epub.semantic.schemas import build_provider_schema
 from book2epub.semantic.structure import (
     BookOutline,
@@ -110,6 +115,9 @@ def _semantic_cache_key(
             "schema_version": "1.0",
             "semantic_decision_schema_version": SEMANTIC_DECISION_SCHEMA_VERSION,
             "relation_application_contract": "1.0",
+            "request_scoped_schema_contract": REQUEST_SCOPED_SCHEMA_CONTRACT_VERSION,
+            "provider_schema_adapter_contract": "2.0",
+            "semantic_output_budget_contract": "1.0",
             "schema_hash": compute_text_sha256(
                 json.dumps(
                     build_provider_schema(BookStateObservationBatch),
@@ -425,8 +433,16 @@ def run_semantic_reconstruction(
     pass_a_dir.mkdir(parents=True, exist_ok=True)
     pass_a_batches: list[StructureDecisionBatch] = []
 
-    for chunk in chunks:
+    for chunk_index, chunk in enumerate(chunks, start=1):
         blocks_json = json.dumps([b.model_dump() for b in chunk.blocks], ensure_ascii=False)
+        logger.info(
+            "[Semantic Pass A] chunk %d/%d blocks=%d chars=%d overlap=%d",
+            chunk_index,
+            len(chunks),
+            len(chunk.block_ids),
+            len(blocks_json),
+            len(chunk.overlap_block_ids),
+        )
         user_text = PASS_A_USER_PROMPT_TEMPLATE.format(
             chunk_id=chunk.chunk_id,
             book_state_json=json.dumps(chunk.book_state, ensure_ascii=False),
@@ -441,10 +457,29 @@ def run_semantic_reconstruction(
             system_instruction=COMMON_SYSTEM_INSTRUCTION,
             user_text=user_text,
             response_model_name="StructureDecisionBatch",
-            response_schema=build_provider_schema(StructureDecisionBatch),
+            response_schema=build_request_scoped_schema(
+                StructureDecisionBatch,
+                provider=provider.name,
+                chunk_id=chunk.chunk_id,
+                block_ids=chunk.block_ids,
+                pass_name="pass_a",
+            ),
+            max_output_tokens=semantic_output_token_budget(len(chunk.block_ids), "pass_a"),
         )
 
         batch_obj, inf_res = provider.infer(req, StructureDecisionBatch)
+        logger.info(
+            "[Semantic Pass A] chunk %d/%d completed latency=%.1fs prompt_tokens=%s "
+            "output_tokens=%s response_chars=%s done_reason=%s schema_retry=%d",
+            chunk_index,
+            len(chunks),
+            inf_res.latency_ms / 1000,
+            inf_res.usage.input_tokens,
+            inf_res.usage.output_tokens,
+            inf_res.response_chars,
+            inf_res.done_reason,
+            inf_res.schema_retry_count,
+        )
 
         # Scope validation: check chunk_id and block_ids before using batch
         try:
@@ -487,6 +522,8 @@ def run_semantic_reconstruction(
                 "transport_attempt_count": inf_res.transport_attempt_count,
                 "schema_retry_count": inf_res.schema_retry_count,
                 "provider_request_ids": inf_res.provider_request_ids,
+                "response_chars": inf_res.response_chars,
+                "done_reason": inf_res.done_reason,
                 "usage": inf_res.usage.model_dump(),
             },
         )
@@ -533,13 +570,21 @@ def run_semantic_reconstruction(
     observation_dir = paths.semantic_dir / "book-state-observations"
     observation_dir.mkdir(parents=True, exist_ok=True)
 
-    for chunk in pass_b_chunks:
+    for chunk_index, chunk in enumerate(pass_b_chunks, start=1):
         # The chunk list is deterministic, but BookState is intentionally dynamic:
         # each request gets the state merged from all earlier chunks.
         chunk = chunk.model_copy(
             update={"book_state": get_book_state_prompt_view(running_book_state)}
         )
         blocks_json = json.dumps([b.model_dump() for b in chunk.blocks], ensure_ascii=False)
+        logger.info(
+            "[Semantic Pass B] chunk %d/%d blocks=%d chars=%d overlap=%d",
+            chunk_index,
+            len(pass_b_chunks),
+            len(chunk.block_ids),
+            len(blocks_json),
+            len(chunk.overlap_block_ids),
+        )
         user_text = PASS_B_USER_PROMPT_TEMPLATE.format(
             chunk_id=chunk.chunk_id,
             book_state_json=json.dumps(chunk.book_state, ensure_ascii=False),
@@ -554,10 +599,29 @@ def run_semantic_reconstruction(
             system_instruction=COMMON_SYSTEM_INSTRUCTION,
             user_text=user_text,
             response_model_name="SemanticDecisionBatch",
-            response_schema=build_provider_schema(SemanticDecisionBatch),
+            response_schema=build_request_scoped_schema(
+                SemanticDecisionBatch,
+                provider=provider.name,
+                chunk_id=chunk.chunk_id,
+                block_ids=chunk.block_ids,
+                pass_name="pass_b",
+            ),
+            max_output_tokens=semantic_output_token_budget(len(chunk.block_ids), "pass_b"),
         )
 
         batch_b, inf_b = provider.infer(req, SemanticDecisionBatch)
+        logger.info(
+            "[Semantic Pass B] chunk %d/%d completed latency=%.1fs prompt_tokens=%s "
+            "output_tokens=%s response_chars=%s done_reason=%s schema_retry=%d",
+            chunk_index,
+            len(pass_b_chunks),
+            inf_b.latency_ms / 1000,
+            inf_b.usage.input_tokens,
+            inf_b.usage.output_tokens,
+            inf_b.response_chars,
+            inf_b.done_reason,
+            inf_b.schema_retry_count,
+        )
         raw_relations = list(batch_b.relations)
 
         # Scope validation for Pass B
@@ -650,6 +714,8 @@ def run_semantic_reconstruction(
                 "transport_attempt_count": inf_b.transport_attempt_count,
                 "schema_retry_count": inf_b.schema_retry_count,
                 "provider_request_ids": inf_b.provider_request_ids,
+                "response_chars": inf_b.response_chars,
+                "done_reason": inf_b.done_reason,
                 "usage": inf_b.usage.model_dump(),
             },
         )

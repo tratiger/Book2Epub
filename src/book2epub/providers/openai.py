@@ -78,7 +78,7 @@ class OpenAIProvider:
         start_time = time.perf_counter()
 
         def _call_openai() -> Any:
-            return self._client.responses.create(
+            return self._client.responses.create(  # type: ignore[call-overload]
                 model=self.model,
                 instructions=request.system_instruction,
                 input=input_val,

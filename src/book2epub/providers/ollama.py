@@ -1,6 +1,7 @@
 """Ollama structured output provider adapter (M7 spec Section 6.3, Appendix G7)."""
 
 import json
+import logging
 import os
 import time
 from typing import Any
@@ -13,6 +14,8 @@ from book2epub.providers.models import (
     StructuredInferenceResult,
 )
 from book2epub.providers.retry import execute_with_retry_detailed
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaProvider:
@@ -72,7 +75,7 @@ class OllamaProvider:
                 model=self.model,
                 messages=messages,
                 format=request.response_schema,
-                options={"temperature": 0},
+                options={"temperature": 0, "num_predict": request.max_output_tokens},
                 stream=False,
             )
 
@@ -83,6 +86,41 @@ class OllamaProvider:
         adopted_request_id = request.request_id
         schema_retry_count = 0
 
+        def response_value(response: Any, key: str) -> Any:
+            if isinstance(response, dict):
+                return response.get(key)
+            return getattr(response, key, None)
+
+        def metadata(response: Any) -> dict[str, Any]:
+            values: dict[str, Any] = {}
+            for key in (
+                "id",
+                "done_reason",
+                "prompt_eval_count",
+                "eval_count",
+                "total_duration",
+                "load_duration",
+                "prompt_eval_duration",
+                "eval_duration",
+            ):
+                value = response_value(response, key)
+                if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                    values[key] = value
+            return values
+
+        def is_truncation(response: Any) -> bool:
+            reason = metadata(response).get("done_reason")
+            if not isinstance(reason, str):
+                return False
+            normalized = reason.lower().replace("-", "_")
+            return normalized in {
+                "length",
+                "max_tokens",
+                "max_output_tokens",
+                "context_length",
+                "context_limit",
+            } or "length" in normalized or "context" in normalized
+
         # Extract message content
         def extract_content(response: Any) -> str:
             if isinstance(response, dict):
@@ -92,13 +130,48 @@ class OllamaProvider:
 
         raw_text = extract_content(resp)
 
+        def failure_details(response: Any, error_type: str) -> dict[str, Any]:
+            details = metadata(response)
+            details.update(
+                {
+                    "error_type": error_type,
+                    "provider": self.name,
+                    "model": self.model,
+                    "request_id": request.request_id,
+                    "raw_response_chars": len(extract_content(response)),
+                }
+            )
+            return details
+
+        def validation_error_type(error: Exception) -> str:
+            return (
+                "structured_output_invalid_json"
+                if isinstance(error, json.JSONDecodeError)
+                else "structured_output_schema_mismatch"
+            )
+
         # Validate with Pydantic locally (Section 4 rule 3)
         try:
             parsed_json = json.loads(raw_text)
             validated_obj = response_model.model_validate(parsed_json)
         except Exception as first_val_err:
-            # Allow 1 schema retry on local Pydantic validation failure
+            if is_truncation(resp):
+                details = failure_details(resp, "structured_output_truncated")
+                raise ProviderError(
+                    "Ollama structured output was truncated; same-request schema retry "
+                    "was skipped",
+                    details=details,
+                ) from first_val_err
+
+            # A completed response with malformed JSON/schema mismatch may have
+            # one schema retry.  A length/context termination never does.
             retry_req_id = f"{request.request_id}-schema-retry"
+            logger.info(
+                "Ollama structured output schema retry 1/1 request_id=%s reason=%s",
+                request.request_id,
+                validation_error_type(first_val_err),
+            )
+            resp_retry = resp
             try:
                 schema_retry_count = 1
                 retry_execution = execute_with_retry_detailed(
@@ -113,53 +186,39 @@ class OllamaProvider:
                 validated_obj = response_model.model_validate(parsed_json)
                 adopted_request_id = retry_req_id
             except Exception as final_val_err:
+                final_response = resp_retry
+                final_type = (
+                    "structured_output_truncated"
+                    if is_truncation(final_response)
+                    else validation_error_type(final_val_err)
+                )
+                details = failure_details(final_response, final_type)
+                details["request_id"] = retry_req_id
                 raise ProviderError(
                     f"Ollama response failed local Pydantic schema validation: {final_val_err}",
-                    details={"provider": self.name, "request_id": retry_req_id},
+                    details=details,
                 ) from first_val_err
 
-        in_tok = getattr(resp, "prompt_eval_count", None)
-        out_tok = getattr(resp, "eval_count", None)
+        final_metadata = metadata(resp)
+        in_tok = final_metadata.get("prompt_eval_count")
+        out_tok = final_metadata.get("eval_count")
         provider_request_ids = [
             response_id
             for response in response_objects
-            if isinstance(
-                response_id := (
-                    response.get("id")
-                    if isinstance(response, dict)
-                    else getattr(response, "id", None)
-                ),
-                str,
-            )
+            if isinstance(response_id := metadata(response).get("id"), str)
         ]
         total_in = sum(
             value
             for response in response_objects
-            if isinstance(
-                value := (
-                    response.get("prompt_eval_count")
-                    if isinstance(response, dict)
-                    else getattr(response, "prompt_eval_count", None)
-                ),
-                int,
-            )
+            if isinstance(value := metadata(response).get("prompt_eval_count"), int)
         )
         total_out = sum(
             value
             for response in response_objects
-            if isinstance(
-                value := (
-                    response.get("eval_count")
-                    if isinstance(response, dict)
-                    else getattr(response, "eval_count", None)
-                ),
-                int,
-            )
+            if isinstance(value := metadata(response).get("eval_count"), int)
         )
         latency_ms = int((time.perf_counter() - start_time) * 1000)
-        final_response_id = (
-            resp.get("id") if isinstance(resp, dict) else getattr(resp, "id", None)
-        )
+        final_response_id = final_metadata.get("id")
         usage = ProviderUsage(
             input_tokens=in_tok if isinstance(in_tok, int) else None,
             output_tokens=out_tok if isinstance(out_tok, int) else None,
@@ -171,6 +230,18 @@ class OllamaProvider:
             total_output_tokens=total_out or None,
             attempt_count=transport_attempt_count,
             schema_retry_count=schema_retry_count,
+            done_reason=(
+                final_metadata.get("done_reason")
+                if isinstance(final_metadata.get("done_reason"), str)
+                else None
+            ),
+            prompt_eval_count=in_tok if isinstance(in_tok, int) else None,
+            eval_count=out_tok if isinstance(out_tok, int) else None,
+            total_duration=final_metadata.get("total_duration"),
+            load_duration=final_metadata.get("load_duration"),
+            prompt_eval_duration=final_metadata.get("prompt_eval_duration"),
+            eval_duration=final_metadata.get("eval_duration"),
+            response_chars=len(raw_text),
         )
 
         result = StructuredInferenceResult(
@@ -185,6 +256,8 @@ class OllamaProvider:
             transport_attempt_count=transport_attempt_count,
             schema_retry_count=schema_retry_count,
             provider_request_ids=provider_request_ids,
+            done_reason=usage.done_reason,
+            response_chars=len(raw_text),
         )
 
         return validated_obj, result

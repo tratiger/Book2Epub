@@ -112,6 +112,9 @@ uv run book2epub convert .\pages -o book.epub `
   --semantic `
   --semantic-provider ollama `
   --semantic-model <local-vision-model> `
+  --semantic-max-chunk-chars 8000 `
+  --semantic-max-chunk-blocks 20 `
+  --semantic-overlap-blocks 4 `
   --semantic-vision auto `
   --presentation infer
 
@@ -176,8 +179,13 @@ uv run book2epub from-middle ".work\jobs\<job-id>\mineru\book_middle.json" -o ou
 | `--ocr-correction` | `off` / `safe` / `all` | OCR誤字脱字補正。既定は `off`。`safe` は本文散文のみ視覚根拠に基づき補正。数式は常に不変。 |
 | `--semantic-provider` | `ollama` / `openai` / `google` / `anthropic` | canonical provider。CLIでは`gemini`も`google`のaliasとして利用可能。 |
 | `--semantic-model` | `<model-id>` | 使用するモデル識別子。特定モデル名には依存しない。 |
+| `--semantic-max-chunk-chars` | integer | Semantic requestの入力文字数上限。Ollamaでは8,000程度から調整。 |
+| `--semantic-max-chunk-blocks` | integer | Semantic requestのblock数上限。Ollamaでは20程度から調整。 |
+| `--semantic-overlap-blocks` | integer | 隣接chunkへ渡す重複block数。既定4。 |
 | `--semantic-vision` | `off` / `auto` / `on` | canonical visual policy。CLIでは`always`も`on`のaliasとして利用可能。 |
 | `--allow-cloud` | flag | 外部クラウドAPIへのデータ送信を明示的に許可。 |
+
+Ollamaのstructured outputは各chunkのblock ID・chunk ID・配列件数をrequest schemaへ動的に反映し、出力予算も入力scopeに応じて制限します。`done_reason=length`などの切断は同一requestを再送せず、metadata付きで失敗します。RTX 5070 Ti 16GB級のローカルモデルでは、まず8,000文字・20 blocks・overlap 4から調整してください。adaptive splitはPass A/BのBookStateとoverlap再調停を安全に保つため、現状は自動実行せず明示的なエラーとして扱います。
 
 ---
 

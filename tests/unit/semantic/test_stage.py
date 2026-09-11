@@ -34,6 +34,7 @@ class _StateCapturingProvider:
 
     def __init__(self) -> None:
         self.pass_b_prompts: list[str] = []
+        self.requests: list[StructuredInferenceRequest] = []
         self.pass_b_calls = 0
 
     def infer(
@@ -41,6 +42,7 @@ class _StateCapturingProvider:
         request: StructuredInferenceRequest,
         response_model: type[TBaseModel],
     ) -> tuple[TBaseModel, StructuredInferenceResult]:
+        self.requests.append(request)
         chunk_id = re.search(r"CHUNK_ID: (\S+)", request.user_text)
         assert chunk_id is not None
         if response_model == StructureDecisionBatch:
@@ -118,6 +120,16 @@ def test_book_state_observation_reaches_next_chunk_prompt(tmp_path: Path) -> Non
     )
 
     assert provider.pass_b_calls == 2
+    pass_a_requests = [
+        r for r in provider.requests if r.response_model_name == "StructureDecisionBatch"
+    ]
+    pass_b_requests = [
+        r for r in provider.requests if r.response_model_name == "SemanticDecisionBatch"
+    ]
+    assert pass_a_requests
+    assert pass_b_requests
+    assert pass_a_requests[0].response_schema["properties"]["chunk_id"]["enum"]
+    assert pass_b_requests[0].response_schema["properties"]["observations"]["maxItems"] == 1
     assert '"term"' not in provider.pass_b_prompts[0]
     assert '"term"' in provider.pass_b_prompts[1]
     assert any(term.normalized_key == "term" for term in result.book_state.domain_terms)

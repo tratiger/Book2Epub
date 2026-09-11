@@ -104,7 +104,11 @@ def execute_with_retry_detailed[T](
                     raise
                 raise ProviderError(
                     f"Provider '{provider_name}' request failed: {e}",
-                    details={"provider": provider_name, "attempt": attempt},
+                    details={
+                        "error_type": "transport_error",
+                        "provider": provider_name,
+                        "attempt": attempt,
+                    },
                 ) from e
 
             # Jittered exponential delay
@@ -122,5 +126,9 @@ def execute_with_retry_detailed[T](
     assert last_error is not None
     raise ProviderError(
         f"Provider '{provider_name}' failed after {max_attempts} attempts: {last_error}",
-        details={"provider": provider_name, "attempts": max_attempts},
+        details={
+            "error_type": "transport_error",
+            "provider": provider_name,
+            "attempts": max_attempts,
+        },
     ) from last_error
