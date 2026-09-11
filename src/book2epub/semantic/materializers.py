@@ -25,6 +25,7 @@ from book2epub.ir.models import (
     ListBlock,
     Paragraph,
     PreformattedBlock,
+    SourceTextSegment,
     Table,
     Text,
 )
@@ -137,9 +138,41 @@ def _supports_callout(block: Block, _evidence: SemanticEvidenceBlock) -> bool:
 
 
 def _supports_list(block: Block, _evidence: SemanticEvidenceBlock) -> bool:
+    return _list_items(block) is not None
+
+
+def _list_items(block: Block) -> list[list[Inline]] | None:
+    """Split only plain Text lines while retaining source segment provenance."""
     if not isinstance(block, (Paragraph, Heading, Aside)):
-        return False
-    return len([line for line in _source_text(block).strip().splitlines() if line.strip()]) >= 2
+        return None
+    if not all(isinstance(inline, Text) for inline in block.inlines):
+        return None
+    text = _source_text(block)
+    lines = text.splitlines()
+    if len(lines) < 2 or text != "\n".join(lines):
+        return None
+
+    text_inlines = [inline for inline in block.inlines if isinstance(inline, Text)]
+    segments = [segment for inline in text_inlines for segment in inline.source_segments]
+    if not segments:
+        return [[Text(text=line)] for line in lines if line.strip()]
+
+    if any(segment.line_index is None for segment in segments):
+        return None
+    grouped: dict[int, list[SourceTextSegment]] = {}
+    for segment in segments:
+        assert segment.line_index is not None
+        grouped.setdefault(segment.line_index, []).append(segment)
+    line_indices = sorted(grouped)
+    if len(line_indices) != len(lines):
+        return None
+    items: list[list[Inline]] = []
+    for line, line_index in zip(lines, line_indices, strict=True):
+        line_segments = grouped[line_index]
+        if "".join(segment.text for segment in line_segments) != line:
+            return None
+        items.append([Text(text=line, source_segments=line_segments)])
+    return items
 
 
 def _supports_table(block: Block, evidence: SemanticEvidenceBlock) -> bool:
@@ -269,15 +302,14 @@ def _to_block_quote(
 def _to_list(
     block: Block, _evidence: SemanticEvidenceBlock, decision: ReconciledSemanticDecision
 ) -> Block:
-    text = _source_text(block)
-    lines = [line for line in text.strip().splitlines() if line.strip()]
-    if len(lines) < 2:
-        raise ValueError("list materializer requires at least two source lines")
+    items = _list_items(block)
+    if items is None:
+        raise ValueError("list materializer requires safe Text-only source lines")
     return ListBlock(
         id=block.id,
         sources=list(block.sources),
         ordered=decision.target == "ordered_list",
-        items=[[Text(text=line)] for line in lines],
+        items=items,
     )
 
 

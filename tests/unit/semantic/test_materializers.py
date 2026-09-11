@@ -1,14 +1,19 @@
 """Canonical allowed-target/materializer contract tests."""
 
+import inspect
+
 import pytest
 
 from book2epub.ir.models import (
     Aside,
     CodeBlock,
     Heading,
+    Hyperlink,
+    InlineMath,
     Paragraph,
     PreformattedBlock,
     SourceRef,
+    SourceTextSegment,
     Table,
     Text,
 )
@@ -53,6 +58,17 @@ def _decision(
 def _authorized(block: object, evidence: SemanticEvidenceBlock) -> SemanticEvidenceBlock:
     return evidence.model_copy(
         update={"allowed_targets": allowed_targets_for(block, evidence)}  # type: ignore[arg-type]
+    )
+
+
+def _segment(segment_id: str, block_id: str, line_index: int, text: str) -> SourceTextSegment:
+    return SourceTextSegment(
+        segment_id=segment_id,
+        page_idx=0,
+        block_id=block_id,
+        line_index=line_index,
+        text=text,
+        text_sha256=compute_text_sha256(text),
     )
 
 
@@ -211,6 +227,58 @@ def test_allowed_unsupported_target_is_explicitly_rejected() -> None:
     assert "No deterministic materializer" in (audits[0].rejection_reason or "")
 
 
+@pytest.mark.parametrize(
+    "inline",
+    [
+        Hyperlink(url="https://example.invalid", children=[Text(text="link")]),
+        InlineMath(latex="x^2"),
+    ],
+)
+def test_rich_inline_multiline_paragraph_is_not_flattened_to_list(inline: object) -> None:
+    block = Paragraph(
+        id="rich-list",
+        sources=_source(),
+        inlines=[Text(text="one\n"), inline, Text(text="\ntwo")],  # type: ignore[list-item]
+    )
+    evidence = _evidence("rich-list", plain="one\nlink\ntwo")
+    assert "unordered_list" not in allowed_targets_for(block, evidence)
+
+    forced_evidence = evidence.model_copy(update={"allowed_targets": ["unordered_list"]})
+    result, audits = apply_semantic_decisions(
+        [block],
+        {"rich-list": _decision("rich-list", "unordered_list")},
+        {"rich-list": forced_evidence},
+    )
+    assert result[0].model_dump() == block.model_dump()
+    assert audits[0].status == "rejected_invalid_target"
+
+
+def test_text_only_list_reconstruction_retains_source_provenance() -> None:
+    block = Paragraph(
+        id="source-list",
+        sources=_source(),
+        inlines=[
+            Text(
+                text="one\ntwo",
+                source_segments=[
+                    _segment("seg-1", "source-list", 0, "one"),
+                    _segment("seg-2", "source-list", 1, "two"),
+                ],
+            )
+        ],
+    )
+    evidence = _authorized(block, _evidence("source-list", plain="one\ntwo"))
+    result, audits = apply_semantic_decisions(
+        [block],
+        {"source-list": _decision("source-list", "unordered_list")},
+        {"source-list": evidence},
+    )
+    assert audits[0].status == "applied"
+    assert result[0].items[0][0].source_segments[0].segment_id == "seg-1"  # type: ignore[union-attr]
+    assert result[0].items[1][0].source_segments[0].segment_id == "seg-2"  # type: ignore[union-attr]
+    assert extract_block_visible_text(result[0]) == "one\ntwo"
+
+
 def test_structural_materializer_fingerprint_matches_source() -> None:
     block = Paragraph(id="p", sources=_source(), inlines=[Text(text="same")])
     before = compute_text_sha256(extract_block_visible_text(block))
@@ -219,3 +287,11 @@ def test_structural_materializer_fingerprint_matches_source() -> None:
         [block], {"p": _decision("p", "heading", heading_level=2)}, {"p": evidence}
     )
     assert compute_text_sha256(extract_block_visible_text(result[0])) == before
+
+
+def test_apply_has_only_registry_materialization_path() -> None:
+    source = inspect.getsource(apply_semantic_decisions)
+    assert source.count("materializer_for(") == 1
+    assert "if isinstance(blk, Table) and target" not in source
+    assert "target in (\"list\", \"unordered_list\", \"ordered_list\")" not in source
+    assert "target.startswith(\"callout_\")" in source
