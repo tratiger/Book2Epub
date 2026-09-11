@@ -481,14 +481,6 @@ def apply_semantic_decisions(
             new_blocks.append(blk)
             continue
 
-        # A high-confidence member_of_callout relation owns grouping for these
-        # source blocks. Keep the original paragraph until relation application;
-        # otherwise Paragraph->Callout would create a duplicate wrapper/child ID.
-        if target.startswith("callout_") or target == "sidebar":
-            if blk.id in deferred_group_ids:
-                new_blocks.append(blk)
-                continue
-
         # ------------------------------------------------------------------ #
         # HARD GATE: allowed_targets check — must happen before any case       #
         # branch. Evidence block must exist and target must be in its          #
@@ -520,6 +512,15 @@ def apply_semantic_decisions(
             audits.append(audit)
             new_blocks.append(rejected_blk)
             continue
+
+        # A validated high-confidence member_of_callout relation owns grouping
+        # for these source blocks. Keep the original paragraph until relation
+        # application; otherwise Paragraph->Callout would create a duplicate
+        # wrapper/child ID. This gate intentionally follows allowed_targets.
+        if target.startswith("callout_") or target == "sidebar":
+            if blk.id in deferred_group_ids:
+                new_blocks.append(blk)
+                continue
 
         # ------------------------------------------------------------------ #
         # 1. table -> preformatted (terminal_output, shell_command, etc.)     #
@@ -629,8 +630,14 @@ def apply_semantic_decisions(
             )
             if callout_sub not in ("note", "tip", "warning", "caution", "important", "sidebar"):
                 callout_sub = "note"
+            existing_ids = {existing.id for existing in blocks}
+            wrapper_id = f"semantic-callout-{blk.id}"
+            suffix = 2
+            while wrapper_id in existing_ids:
+                wrapper_id = f"semantic-callout-{blk.id}-{suffix}"
+                suffix += 1
             new_callout = Callout(
-                id=blk.id,
+                id=wrapper_id,
                 sources=blk.sources,
                 subtype=callout_sub,  # type: ignore[arg-type]
                 blocks=[blk],
@@ -830,18 +837,41 @@ def _callout_subtype(
     semantic_decisions: dict[str, ReconciledSemanticDecision],
     auto_apply_threshold: float,
     single_vote_threshold: float,
+    evidence_lookup: dict[str, SemanticEvidenceBlock] | None = None,
 ) -> str | None:
     valid = {"note", "tip", "warning", "caution", "important", "sidebar"}
-    for block in source_blocks:
-        if isinstance(block, Callout):
-            return block.subtype
-        decision = semantic_decisions.get(block.id)
-        if decision is None or decision.is_conflict:
-            continue
+
+    def usable_decision(
+        block: Block, decision: ReconciledSemanticDecision
+    ) -> bool:
+        if decision.is_conflict:
+            return False
         decision_threshold = (
             single_vote_threshold if decision.single_vote else auto_apply_threshold
         )
         if decision.confidence < decision_threshold:
+            return False
+        if evidence_lookup is not None:
+            evidence = evidence_lookup.get(block.id)
+            if evidence is None or not validate_semantic_target(evidence, decision.target):
+                return False
+        return True
+
+    # An explicit but unauthorized callout decision must not become authorized
+    # indirectly through a group relation. It also prevents a different source
+    # in the same group from masking the invalid target.
+    for block in source_blocks:
+        decision = semantic_decisions.get(block.id)
+        if decision is not None and (
+            decision.target.startswith("callout_") or decision.target == "sidebar"
+        ) and not usable_decision(block, decision):
+            return None
+
+    for block in source_blocks:
+        if isinstance(block, Callout):
+            return block.subtype
+        decision = semantic_decisions.get(block.id)
+        if decision is None or not usable_decision(block, decision):
             continue
         target = decision.target if decision else ""
         if target.startswith("callout_"):
@@ -859,6 +889,7 @@ def apply_semantic_relations(
     semantic_decisions: dict[str, ReconciledSemanticDecision] | None = None,
     auto_apply_threshold: float = 0.80,
     single_vote_threshold: float = 0.85,
+    evidence_lookup: dict[str, SemanticEvidenceBlock] | None = None,
 ) -> tuple[list[Block], list[SemanticRelationAuditRecord]]:
     """Validate and apply reconciled Pass B relations without generating text."""
     current = list(blocks)
@@ -968,6 +999,7 @@ def apply_semantic_relations(
                     decisions,
                     auto_apply_threshold,
                     single_vote_threshold,
+                    evidence_lookup,
                 )
                 if subtype is None:
                     audits.append(

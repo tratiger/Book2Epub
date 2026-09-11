@@ -11,7 +11,7 @@ from pathlib import Path
 
 from book2epub.cache import compute_semantic_cache_key
 from book2epub.config import JobConfig
-from book2epub.ir.models import BookIR
+from book2epub.ir.models import Block, BookIR
 from book2epub.paths import JobPaths
 from book2epub.providers.base import StructuredProvider
 from book2epub.providers.factory import create_provider
@@ -22,6 +22,7 @@ from book2epub.semantic.apply import (
     apply_semantic_decisions,
     apply_semantic_relations,
     apply_structure_decisions,
+    validate_semantic_target,
 )
 from book2epub.semantic.book_state import (
     BookState,
@@ -40,6 +41,7 @@ from book2epub.semantic.hashing import compute_text_sha256
 from book2epub.semantic.models import (
     SEMANTIC_DECISION_SCHEMA_VERSION,
     SemanticDraftBook,
+    SemanticEvidenceBlock,
     SemanticEvidenceBook,
 )
 from book2epub.semantic.prompts import (
@@ -57,6 +59,7 @@ from book2epub.semantic.relations import (
     ReconciledRelation,
     RelationKey,
     reconcile_relation_batches,
+    validate_relation,
     validate_unique_block_ids,
 )
 from book2epub.semantic.schemas import build_provider_schema
@@ -151,16 +154,57 @@ def _load_reconciled_decisions(
 
 def _deferred_relation_group_ids(
     relations: dict[RelationKey, ReconciledRelation],
+    intermediate_blocks: list[Block],
+    semantic_decisions: dict[str, ReconciledSemanticDecision],
+    evidence_lookup: dict[str, SemanticEvidenceBlock],
     auto_apply_threshold: float,
     single_vote_threshold: float = 0.85,
 ) -> set[str]:
-    """Return callout members whose relation owns the single wrapper materialization."""
+    """Return only safely materializable callout groups.
+
+    Deferring a block decision is safe only when the relation itself would pass
+    structural validation and the relation's subtype supplier is independently
+    authorized by the same evidence/threshold gates as block materialization.
+    """
     deferred: set[str] = set()
+    blocks_by_id = {block.id: block for block in intermediate_blocks}
+    block_order = {block.id: index for index, block in enumerate(intermediate_blocks)}
     for relation in relations.values():
         if relation.relation_type != "member_of_callout" or relation.is_conflict:
             continue
         threshold = single_vote_threshold if relation.single_vote else auto_apply_threshold
-        if relation.confidence >= threshold:
+        if relation.confidence < threshold:
+            continue
+        valid, _ = validate_relation(relation, blocks_by_id, block_order)
+        if not valid:
+            continue
+
+        subtype_supplied = False
+        safe = True
+        for block_id in relation.source_block_ids:
+            decision = semantic_decisions.get(block_id)
+            if decision is None:
+                if blocks_by_id[block_id].kind == "callout":
+                    subtype_supplied = True
+                continue
+            if decision.is_conflict:
+                safe = False
+                break
+            decision_threshold = (
+                single_vote_threshold if decision.single_vote else auto_apply_threshold
+            )
+            target = decision.target
+            if target.startswith("callout_") or target == "sidebar":
+                evidence = evidence_lookup.get(block_id)
+                if (
+                    evidence is None
+                    or decision.confidence < decision_threshold
+                    or not validate_semantic_target(evidence, target)
+                ):
+                    safe = False
+                    break
+                subtype_supplied = True
+        if safe and subtype_supplied:
             deferred.update(relation.source_block_ids)
     return deferred
 
@@ -219,7 +263,11 @@ def _materialize_cached_semantic_result(
         evidence_lookup=evidence_lookup,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
         defer_relation_group_block_ids=_deferred_relation_group_ids(
-            relations, cfg.semantic.auto_apply_threshold
+            relations,
+            intermediate_blocks,
+            semantic_decisions,
+            evidence_lookup,
+            cfg.semantic.auto_apply_threshold,
         ),
     )
     final_blocks, relation_apply_audits = apply_semantic_relations(
@@ -227,6 +275,7 @@ def _materialize_cached_semantic_result(
         relations=relations,
         semantic_decisions=semantic_decisions,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
+        evidence_lookup=evidence_lookup,
     )
     relation_audits = relation_scope_audits + relation_apply_audits
     duplicate_ids = validate_unique_block_ids(final_blocks)
@@ -645,7 +694,11 @@ def run_semantic_reconstruction(
         evidence_lookup=evidence_lookup,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
         defer_relation_group_block_ids=_deferred_relation_group_ids(
-            reconciled_relations, cfg.semantic.auto_apply_threshold
+            reconciled_relations,
+            intermediate_blocks,
+            reconciled_sem,
+            evidence_lookup,
+            cfg.semantic.auto_apply_threshold,
         ),
     )
     final_blocks, relation_apply_audits = apply_semantic_relations(
@@ -653,6 +706,7 @@ def run_semantic_reconstruction(
         relations=reconciled_relations,
         semantic_decisions=reconciled_sem,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
+        evidence_lookup=evidence_lookup,
     )
     relation_audits = relation_scope_audits + relation_apply_audits
     duplicate_ids = validate_unique_block_ids(final_blocks)

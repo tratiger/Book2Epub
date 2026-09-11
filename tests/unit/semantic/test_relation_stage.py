@@ -130,6 +130,53 @@ class _CalloutRelationProvider(_RelationProvider):
         return batch, result  # type: ignore[return-value]
 
 
+class _CalloutSafetyProvider(_RelationProvider):
+    def __init__(self, relation_source_ids: list[str]) -> None:
+        super().__init__()
+        self.relation_source_ids = relation_source_ids
+
+    def infer(
+        self,
+        request: StructuredInferenceRequest,
+        response_model: type[TBaseModel],
+    ) -> tuple[TBaseModel, StructuredInferenceResult]:
+        self.calls += 1
+        chunk_match = re.search(r"CHUNK_ID: (\S+)", request.user_text)
+        assert chunk_match is not None
+        chunk_id = chunk_match.group(1)
+        if response_model == StructureDecisionBatch:
+            batch: BaseModel = StructureDecisionBatch(chunk_id=chunk_id)
+        else:
+            batch = SemanticDecisionBatch(
+                chunk_id=chunk_id,
+                decisions=[
+                    SemanticBlockDecision(
+                        block_id="p1",
+                        operation="retype",
+                        target_type="callout_warning",
+                        confidence=0.95,
+                    )
+                ],
+                relations=[
+                    SemanticRelationDecision(
+                        relation_type="member_of_callout",
+                        source_block_ids=self.relation_source_ids,
+                        confidence=0.95,
+                    )
+                ],
+            )
+        result = StructuredInferenceResult(
+            request_id=request.request_id,
+            provider=self.name,
+            model=self.model,
+            raw_text=batch.model_dump_json(),
+            parsed_json=batch.model_dump(),
+            usage=ProviderUsage(input_tokens=1, output_tokens=1),
+            latency_ms=0,
+        )
+        return batch, result  # type: ignore[return-value]
+
+
 def _fixture() -> tuple[BookIR, SemanticEvidenceBook, SemanticDraftBook]:
     caption = Paragraph(
         id="caption",
@@ -279,3 +326,78 @@ def test_stage_callout_decision_and_group_relation_materialize_once(tmp_path: Pa
     assert result.bookir.blocks[0].kind == "callout"
     assert result.bookir.blocks[0].subtype == "warning"  # type: ignore[union-attr]
     assert [child.id for child in result.bookir.blocks[0].blocks] == ["p1", "p2"]  # type: ignore[union-attr]
+
+
+def _callout_safety_fixture(
+    allowed_targets: list[str],
+) -> tuple[BookIR, SemanticEvidenceBook, SemanticDraftBook]:
+    blocks = [
+        Paragraph(
+            id=block_id,
+            sources=[SourceRef(page_idx=0, source_type="text")],
+            inlines=[Text(text=text)],
+        )
+        for block_id, text in [("p1", "Warning"), ("p2", "Details"), ("p3", "More")]
+    ]
+    raw_ir = BookIR(source=SourceDocument(page_count=1), blocks=blocks)
+    evidence = SemanticEvidenceBook(
+        source_middle_sha256="middle-callout-safety",
+        raw_bookir_sha256="raw-callout-safety",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="p1",
+                current_kind="paragraph",
+                plain_text="Warning",
+                allowed_targets=allowed_targets,
+            ),
+            SemanticEvidenceBlock(block_id="p2", current_kind="paragraph", plain_text="Details"),
+            SemanticEvidenceBlock(block_id="p3", current_kind="paragraph", plain_text="More"),
+        ],
+    )
+    draft = SemanticDraftBook(
+        book_id="callout-safety-book",
+        blocks=[
+            DraftBlock(block_id=block_id, current_kind="paragraph", text_preview=text)
+            for block_id, text in [("p1", "Warning"), ("p2", "Details"), ("p3", "More")]
+        ],
+    )
+    return raw_ir, evidence, draft
+
+
+def test_invalid_noncontiguous_relation_preserves_valid_standalone_callout(tmp_path: Path) -> None:
+    raw_ir, evidence, draft = _callout_safety_fixture(["callout_warning"])
+    cfg = JobConfig(
+        app={"work_dir": tmp_path / ".work"},
+        semantic=SemanticConfig(enabled=True, max_chunk_blocks=10),
+    )
+    result = run_semantic_reconstruction(
+        raw_ir,
+        evidence,
+        draft,
+        cfg,
+        create_job_paths(cfg.app.work_dir, job_id="callout-noncontiguous"),
+        _CalloutSafetyProvider(["p1", "p3"]),
+    )
+    assert [block.kind for block in result.bookir.blocks] == ["callout", "paragraph", "paragraph"]
+    assert result.bookir.blocks[0].id == "semantic-callout-p1"
+    assert result.bookir.blocks[0].blocks[0].id == "p1"  # type: ignore[union-attr]
+    assert result.relation_audits[0].status == "rejected"
+
+
+def test_callout_relation_cannot_bypass_allowed_target_gate(tmp_path: Path) -> None:
+    raw_ir, evidence, draft = _callout_safety_fixture([])
+    cfg = JobConfig(
+        app={"work_dir": tmp_path / ".work"},
+        semantic=SemanticConfig(enabled=True, max_chunk_blocks=10),
+    )
+    result = run_semantic_reconstruction(
+        raw_ir,
+        evidence,
+        draft,
+        cfg,
+        create_job_paths(cfg.app.work_dir, job_id="callout-invalid-target"),
+        _CalloutSafetyProvider(["p1", "p2"]),
+    )
+    assert [block.kind for block in result.bookir.blocks] == ["paragraph", "paragraph", "paragraph"]
+    assert any(a.status == "rejected_invalid_target" for a in result.audits)
+    assert result.relation_audits[0].status == "rejected"
