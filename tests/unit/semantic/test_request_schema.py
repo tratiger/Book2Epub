@@ -1,3 +1,6 @@
+import json
+from math import ceil
+
 from pydantic import BaseModel
 
 from book2epub.semantic.decisions import SemanticDecisionBatch
@@ -58,6 +61,27 @@ def test_pass_b_schema_bounds_decisions_relations_and_observations() -> None:
     assert relation["properties"]["target_block_id"]["anyOf"][0]["enum"] == ids
 
 
+def test_pass_b_nested_chunk_id_uses_chunk_scope_and_block_ids_stay_separate() -> None:
+    ids = ["b1", "b2", "b3"]
+    schema = build_request_scoped_schema(
+        SemanticDecisionBatch,
+        provider="ollama",
+        chunk_id="sem-0007-current",
+        block_ids=ids,
+        pass_name="pass_b",
+    )
+
+    observation = _definition(schema, "BookStateObservationBatch")
+    assert observation["properties"]["chunk_id"]["enum"] == ["sem-0007-current"]
+    assert observation["properties"]["chunk_id"].get("maxItems") is None
+    heading_observation = _definition(schema, "HeadingPatternObservation")
+    assert heading_observation["properties"]["example_block_ids"]["items"]["enum"] == ids
+    numbering_example = _definition(schema, "NumberingConventionExample")
+    assert numbering_example["properties"]["block_id"]["enum"] == ids
+    domain_observation = _definition(schema, "DomainTermObservation")
+    assert domain_observation["properties"]["source_block_id"]["enum"] == ids
+
+
 def test_ollama_schema_keeps_nullable_fields_optional_but_openai_contract_stays_strict() -> None:
     class OptionalResponse(BaseModel):
         required_value: str
@@ -78,4 +102,62 @@ def test_ollama_schema_keeps_nullable_fields_optional_but_openai_contract_stays_
 
 def test_semantic_output_budget_is_bounded_and_scales_with_scope() -> None:
     assert semantic_output_token_budget(1, "pass_a") < semantic_output_token_budget(20, "pass_b")
-    assert semantic_output_token_budget(1000, "pass_b") == 4096
+    assert semantic_output_token_budget(20, "pass_b") == 8192
+    assert semantic_output_token_budget(1000, "pass_b") == 8192
+
+
+def test_twenty_block_realistic_worst_case_fits_pass_b_budget() -> None:
+    ids = [f"block-{index:02d}" for index in range(20)]
+    evidence_codes = [
+        "TABLE_HAS_REAL_ROW_COLUMN_SEMANTICS",
+        "OUTLINE_CONTEXT",
+        "MINERU_CLASSIFICATION_SUPPORTED",
+        "AMBIGUOUS",
+    ]
+    payload = {
+        "schema_version": "1.1",
+        "chunk_id": "sem-0020-current",
+        "decisions": [
+            {
+                "block_id": block_id,
+                "operation": "retype_and_set_subtype",
+                "target_type": "generic_preformatted",
+                "subtype": "generic_preformatted",
+                "heading_level": None,
+                "confidence": 0.91,
+                "evidence_codes": evidence_codes,
+                "rationale": "bounded source-grounded rationale " * 8,
+            }
+            for block_id in ids
+        ],
+        "relations": [
+            {
+                "relation_type": "paragraph_continuation",
+                "source_block_ids": [ids[index % 20], ids[(index + 1) % 20]],
+                "target_block_id": ids[(index + 2) % 20],
+                "confidence": 0.88,
+                "evidence_codes": ["FOLLOWING_PROSE_REFERS_TO_OUTPUT"],
+                "rationale": "adjacent source-order continuation " * 8,
+            }
+            for index in range(40)
+        ],
+        "observations": [
+            {
+                "schema_version": "1.0",
+                "chunk_id": "sem-0020-current",
+                "heading_patterns": [],
+                "preformatted_conventions": [],
+                "callout_conventions": [],
+                "numbering_conventions": [],
+                "domain_terms": [
+                    {"term": f"TERM-{index}", "source_block_id": ids[index], "confidence": 0.9}
+                    for index in range(20)
+                ],
+            }
+        ],
+    }
+    estimated_tokens = ceil(
+        len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) / 4
+    )
+
+    assert estimated_tokens < semantic_output_token_budget(20, "pass_b")
