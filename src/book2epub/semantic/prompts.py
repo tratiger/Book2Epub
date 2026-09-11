@@ -58,7 +58,7 @@ BLOCKS:
 
 PASS_B_USER_PROMPT_TEMPLATE = """\
 TASK: SEMANTIC_PASS_B
-SCHEMA_VERSION: 1.0
+SCHEMA_VERSION: 1.1
 CHUNK_ID: {chunk_id}
 
 Review the semantic type of the supplied blocks in context.
@@ -89,6 +89,14 @@ conventions and exact domain spellings supported by the supplied block IDs.
 For numbering conventions, use `examples` with an exact in-chunk block_id and
 verbatim caption/label; never invent, normalize, or paraphrase labels. Never
 include model rationale as an observation.
+
+Return all three response sections:
+- `decisions` for block-level semantic classification and finite subtype/level changes.
+- `relations` for source-grounded `caption_of`, `footnote_of`,
+  `paragraph_continuation`, `member_of_callout`, and `member_of_example` links.
+- `observations` for the bounded BookState observations described above.
+Use only block IDs supplied in this prompt for relation source/target IDs. Do not
+generate relation text, replacement prose, captions, or any other content.
 
 BOOK_STATE:
 {book_state_json}

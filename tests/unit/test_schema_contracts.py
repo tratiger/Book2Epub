@@ -17,9 +17,45 @@ from book2epub.semantic.decisions import (
     SemanticDecisionBatch,
     SemanticRelationDecision,
 )
-from book2epub.semantic.models import SemanticEvidenceBook
+from book2epub.semantic.models import (
+    BOOK_STATE_OBSERVATION_SCHEMA_VERSION,
+    PROMPT_CONTRACT_VERSION,
+    SEMANTIC_DECISION_SCHEMA_VERSION,
+    SEMANTIC_PATCH_SCHEMA_VERSION,
+    SEMANTIC_RELATION_SCHEMA_VERSION,
+    SemanticEvidenceBook,
+)
+from book2epub.semantic.prompts import PASS_B_USER_PROMPT_TEMPLATE
 from book2epub.semantic.schemas import build_provider_schema
 from book2epub.visual.models import OCRCorrectionProposal, VisualSemanticDecision
+
+
+def test_pass_b_prompt_and_version_constants_match_contract() -> None:
+    assert SEMANTIC_DECISION_SCHEMA_VERSION == "1.1"
+    assert SEMANTIC_RELATION_SCHEMA_VERSION == "1.0"
+    assert SEMANTIC_PATCH_SCHEMA_VERSION == "1.1"
+    assert BOOK_STATE_OBSERVATION_SCHEMA_VERSION == "1.0"
+    assert PROMPT_CONTRACT_VERSION == "1.1"
+
+    prompt = PASS_B_USER_PROMPT_TEMPLATE.format(
+        chunk_id="chunk-1",
+        book_state_json="{}",
+        outline_context_json="[]",
+        semantic_draft_blocks_json="[]",
+    )
+    assert "SCHEMA_VERSION: 1.1" in prompt
+    assert "`decisions`" in prompt
+    assert "`relations`" in prompt
+    assert "`observations`" in prompt
+    for relation_type in (
+        "caption_of",
+        "footnote_of",
+        "paragraph_continuation",
+        "member_of_callout",
+        "member_of_example",
+    ):
+        assert relation_type in prompt
+    assert "only block IDs supplied in this prompt" in prompt
 
 
 def test_pass_b_schema_is_canonical_1_1_and_relation_aware() -> None:
