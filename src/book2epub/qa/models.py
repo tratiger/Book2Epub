@@ -186,6 +186,11 @@ class SemanticQAMetrics:
     outline_cycle_count: int = 0
     outline_monotonic_error_count: int = 0
     outline_unresolved_target_count: int = 0
+    relation_proposed_count: int = 0
+    relation_applied_count: int = 0
+    relation_rejected_count: int = 0
+    relation_conflict_count: int = 0
+    relation_queued_visual_count: int = 0
 
 
 @dataclass

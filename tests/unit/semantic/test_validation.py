@@ -15,7 +15,11 @@ from book2epub.semantic.book_state import (
     NumberingConventionObservation,
 )
 from book2epub.semantic.chunking import SemanticChunkInput
-from book2epub.semantic.decisions import SemanticDecision, SemanticDecisionBatch
+from book2epub.semantic.decisions import (
+    SemanticDecision,
+    SemanticDecisionBatch,
+    SemanticRelationDecision,
+)
 from book2epub.semantic.models import DraftBlock
 from book2epub.semantic.structure import StructureDecision, StructureDecisionBatch
 from book2epub.semantic.validation import (
@@ -530,3 +534,24 @@ def test_related_block_ids_out_of_scope_detected_and_sanitized() -> None:
     filtered = filter_out_of_scope_semantic_decisions(batch, chunk)
     assert len(filtered.decisions) == 1
     assert filtered.decisions[0].related_block_ids == ["blk-101"]
+
+
+def test_relation_scope_rejects_unknown_source_and_target() -> None:
+    chunk = _make_chunk("sem-relation-scope", ["blk-100"])
+    batch = SemanticDecisionBatch(
+        chunk_id=chunk.chunk_id,
+        relations=[
+            SemanticRelationDecision(
+                relation_type="caption_of",
+                source_block_ids=["ghost"],
+                target_block_id="blk-foreign",
+                confidence=0.95,
+            )
+        ],
+    )
+
+    violations = validate_semantic_batch_scope(batch, chunk)
+    assert any("ghost" in violation for violation in violations)
+    assert any("blk-foreign" in violation for violation in violations)
+    filtered = filter_out_of_scope_semantic_decisions(batch, chunk)
+    assert filtered.relations == []

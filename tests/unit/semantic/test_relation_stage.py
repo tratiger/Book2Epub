@@ -1,0 +1,171 @@
+"""Live and semantic-cache relation path integration tests."""
+
+import re
+from pathlib import Path
+from typing import TypeVar
+
+from pydantic import BaseModel
+
+from book2epub.config import JobConfig, SemanticConfig
+from book2epub.ir.models import BookIR, CodeBlock, Paragraph, SourceDocument, SourceRef, Text
+from book2epub.paths import create_job_paths
+from book2epub.pipeline import run_conversion_m3, run_conversion_m4
+from book2epub.providers.models import (
+    ProviderUsage,
+    StructuredInferenceRequest,
+    StructuredInferenceResult,
+)
+from book2epub.semantic.decisions import (
+    SemanticBlockDecision,
+    SemanticDecisionBatch,
+    SemanticRelationDecision,
+)
+from book2epub.semantic.models import (
+    DraftBlock,
+    SemanticDraftBook,
+    SemanticEvidenceBlock,
+    SemanticEvidenceBook,
+)
+from book2epub.semantic.stage import run_semantic_reconstruction
+from book2epub.semantic.structure import StructureDecisionBatch
+
+TBaseModel = TypeVar("TBaseModel", bound=BaseModel)
+
+
+class _RelationProvider:
+    name = "relation-provider"
+    model = "relation-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def infer(
+        self,
+        request: StructuredInferenceRequest,
+        response_model: type[TBaseModel],
+    ) -> tuple[TBaseModel, StructuredInferenceResult]:
+        self.calls += 1
+        chunk_match = re.search(r"CHUNK_ID: (\S+)", request.user_text)
+        assert chunk_match is not None
+        chunk_id = chunk_match.group(1)
+        if response_model == StructureDecisionBatch:
+            batch: BaseModel = StructureDecisionBatch(chunk_id=chunk_id)
+        else:
+            batch = SemanticDecisionBatch(
+                chunk_id=chunk_id,
+                decisions=[
+                    SemanticBlockDecision(
+                        block_id="code",
+                        operation="keep",
+                        confidence=0.95,
+                    )
+                ],
+                relations=[
+                    SemanticRelationDecision(
+                        relation_type="caption_of",
+                        source_block_ids=["caption"],
+                        target_block_id="code",
+                        confidence=0.95,
+                    )
+                ],
+            )
+        result = StructuredInferenceResult(
+            request_id=request.request_id,
+            provider=self.name,
+            model=self.model,
+            raw_text=batch.model_dump_json(),
+            parsed_json=batch.model_dump(),
+            usage=ProviderUsage(input_tokens=1, output_tokens=1),
+            latency_ms=0,
+        )
+        return batch, result  # type: ignore[return-value]
+
+
+def _fixture() -> tuple[BookIR, SemanticEvidenceBook, SemanticDraftBook]:
+    caption = Paragraph(
+        id="caption",
+        sources=[SourceRef(page_idx=0, source_type="text")],
+        inlines=[Text(text="Figure 1: System")],
+    )
+    code = CodeBlock(
+        id="code",
+        sources=[SourceRef(page_idx=0, source_type="code")],
+        text="print('system')",
+    )
+    raw_ir = BookIR(
+        source=SourceDocument(page_count=1),
+        blocks=[caption, code],
+    )
+    evidence = SemanticEvidenceBook(
+        source_middle_sha256="middle",
+        raw_bookir_sha256="raw",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="caption",
+                current_kind="paragraph",
+                source_type="text",
+                plain_text="Figure 1: System",
+            ),
+            SemanticEvidenceBlock(
+                block_id="code",
+                current_kind="code",
+                source_type="code",
+                preformatted_text="print('system')",
+            ),
+        ],
+    )
+    draft = SemanticDraftBook(
+        book_id="book",
+        blocks=[
+            DraftBlock(
+                block_id="caption",
+                current_kind="paragraph",
+                source_type="text",
+                text_preview="Figure 1: System",
+                page_idx=0,
+            ),
+            DraftBlock(
+                block_id="code",
+                current_kind="code",
+                source_type="code",
+                page_idx=0,
+            ),
+        ],
+    )
+    return raw_ir, evidence, draft
+
+
+def test_live_and_cache_hit_relation_paths_produce_same_semantic_ir(tmp_path: Path) -> None:
+    raw_ir, evidence, draft = _fixture()
+    cfg = JobConfig(
+        app={"work_dir": tmp_path / ".work"},
+        semantic=SemanticConfig(enabled=True, max_chunk_blocks=10),
+    )
+    provider = _RelationProvider()
+    first_paths = create_job_paths(cfg.app.work_dir, job_id="job-a")
+    first = run_semantic_reconstruction(raw_ir, evidence, draft, cfg, first_paths, provider)
+    first_calls = provider.calls
+    second = run_semantic_reconstruction(
+        raw_ir, evidence, draft, cfg, create_job_paths(cfg.app.work_dir, job_id="job-b"), provider
+    )
+
+    assert first_calls > 0
+    assert provider.calls == first_calls
+    assert first.bookir.model_dump() == second.bookir.model_dump()
+    assert first.bookir.blocks[0].kind == "code"
+    assert second.bookir.blocks[0].kind == "code"
+    assert len(first.relation_audits) == 1
+    assert len(second.relation_audits) == 1
+    assert second.relation_audits[0].status == "applied"
+
+    from book2epub.ir.normalize import normalize_bookir
+
+    normalized = normalize_bookir(first.bookir)
+    render_result = run_conversion_m3(normalized, first_paths, cfg)
+    package_result = run_conversion_m4(
+        render_result,
+        tmp_path / "relation.epub",
+        first_paths,
+        cfg,
+    )
+    assert package_result.epub_path.is_file()

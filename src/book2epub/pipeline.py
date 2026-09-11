@@ -830,6 +830,19 @@ def run_conversion_m5(
         elif isinstance(applied_data, dict):
             audits = [SemanticAuditRecord.model_validate(a) for a in applied_data.get("audits", [])]
 
+    relation_audits = None
+    if paths.semantic_relations_json.is_file():
+        try:
+            from book2epub.semantic.decisions import SemanticRelationAuditRecord
+
+            relation_data = json.loads(paths.semantic_relations_json.read_text(encoding="utf-8"))
+            if isinstance(relation_data, list):
+                relation_audits = [
+                    SemanticRelationAuditRecord.model_validate(item) for item in relation_data
+                ]
+        except Exception:
+            relation_audits = None
+
     ocr_audits = None
     if paths.semantic_ocr_corrections_json.is_file():
         try:
@@ -877,12 +890,22 @@ def run_conversion_m5(
     )
 
     preservation_ledger = build_preservation_ledger(
-        evidence, book_ir, audits, ocr_audits=ocr_audits
+        evidence,
+        book_ir,
+        audits,
+        ocr_audits=ocr_audits,
+        relation_audits=relation_audits,
     )
     preservation_violations = evaluate_preservation_qa(
         preservation_ledger, evidence, book_ir, ocr_audits=ocr_audits
     )
-    semantic_metrics = evaluate_semantic_transitions(evidence, book_ir, audits, outline=outline)
+    semantic_metrics = evaluate_semantic_transitions(
+        evidence,
+        book_ir,
+        audits,
+        outline=outline,
+        relation_audits=relation_audits,
+    )
     ocr_metrics, ocr_warns = evaluate_ocr_qa(
         paths.semantic_ocr_corrections_json, cfg.ocr_correction.mode
     )

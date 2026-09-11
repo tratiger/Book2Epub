@@ -37,7 +37,7 @@ from book2epub.qa.models import (
     QAViolation,
     SemanticQAMetrics,
 )
-from book2epub.semantic.decisions import SemanticAuditRecord
+from book2epub.semantic.decisions import SemanticAuditRecord, SemanticRelationAuditRecord
 from book2epub.semantic.hashing import compute_content_sha256, compute_text_sha256
 from book2epub.semantic.models import SemanticEvidenceBook
 from book2epub.semantic.structure import BookOutline
@@ -237,6 +237,7 @@ def build_preservation_ledger(
     bookir: BookIR,
     audits: list[SemanticAuditRecord] | None = None,
     ocr_audits: list[Any] | None = None,
+    relation_audits: list[SemanticRelationAuditRecord] | None = None,
 ) -> list[PreservationLedgerEntry]:
     """
     Construct disposition accounting ledger for all source evidence blocks (Appendix N2).
@@ -269,9 +270,46 @@ def build_preservation_ledger(
                 if getattr(oa, "status", "") == "applied":
                     applied_ocr_by_seg[(b_id, s_id)] = getattr(oa, "new_text", "")
 
+    applied_relations_by_source: dict[str, SemanticRelationAuditRecord] = {}
+    if relation_audits:
+        for relation_audit in relation_audits:
+            if relation_audit.status == "applied":
+                for source_id in relation_audit.source_block_ids:
+                    applied_relations_by_source[source_id] = relation_audit
+
     if evidence:
         for ev in evidence.blocks:
             found = final_blocks_by_id.get(ev.block_id)
+            matched_relation = applied_relations_by_source.get(ev.block_id)
+            if found is None and matched_relation is not None and matched_relation.target_block_id:
+                target_found = final_blocks_by_id.get(matched_relation.target_block_id)
+                if target_found is not None:
+                    target_block, _ = target_found
+                    _, target_hash = compute_final_block_hashes(target_block)
+                    target_assets: list[str] = []
+                    if getattr(target_block, "asset_id", None):
+                        target_assets.append(getattr(target_block, "asset_id"))
+                    if getattr(target_block, "fallback_asset_id", None):
+                        target_assets.append(getattr(target_block, "fallback_asset_id"))
+                    ledger.append(
+                        PreservationLedgerEntry(
+                            source_block_id=ev.block_id,
+                            source_kind=ev.source_type,
+                            source_content_sha256=ev.content_sha256,
+                            final_block_ids=[target_block.id],
+                            final_kinds=[target_block.kind],
+                            final_content_sha256s=[target_hash],
+                            disposition="moved_into_relation",
+                            source_asset_ids=ev.asset_ids,
+                            final_asset_ids=target_assets,
+                            semantic_decision_ids=[matched_relation.relation_id],
+                            reason=(
+                                "Existing source inline attached via "
+                                f"{matched_relation.relation_type} to '{target_block.id}'"
+                            ),
+                        )
+                    )
+                    continue
             if found is not None:
                 final_block, parent_id = found
                 final_kind = final_block.kind
@@ -852,9 +890,24 @@ def evaluate_semantic_transitions(
     bookir: BookIR,
     audits: list[SemanticAuditRecord] | None,
     outline: BookOutline | None = None,
+    relation_audits: list[SemanticRelationAuditRecord] | None = None,
 ) -> SemanticQAMetrics:
     """Evaluate semantic reconstruction rates, transitions, and outline coverage."""
     metrics = SemanticQAMetrics()
+    if relation_audits:
+        metrics.relation_proposed_count = len(relation_audits)
+        metrics.relation_applied_count = sum(
+            1 for relation in relation_audits if relation.status == "applied"
+        )
+        metrics.relation_rejected_count = sum(
+            1 for relation in relation_audits if relation.status == "rejected"
+        )
+        metrics.relation_conflict_count = sum(
+            1 for relation in relation_audits if relation.status == "conflict"
+        )
+        metrics.relation_queued_visual_count = sum(
+            1 for relation in relation_audits if relation.status == "queued_visual"
+        )
     if not audits:
         return metrics
 

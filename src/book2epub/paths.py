@@ -202,6 +202,11 @@ class JobPaths:
         return self.semantic_dir / "applied.m8.json"
 
     @property
+    def semantic_relations_json(self) -> Path:
+        """Authoritative Pass B relation reconciliation/application audit."""
+        return self.semantic_dir / "relations.json"
+
+    @property
     def semantic_provider_usage_json(self) -> Path:
         return self.semantic_dir / "provider-usage.json"
 

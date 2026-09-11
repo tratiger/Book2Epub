@@ -9,6 +9,8 @@ from book2epub.ir.models import (
     BlockQuote,
     Callout,
     CodeBlock,
+    ExampleBlock,
+    Footnote,
     Heading,
     Hyperlink,
     Inline,
@@ -22,12 +24,18 @@ from book2epub.ir.models import (
     Table,
     Text,
 )
-from book2epub.semantic.decisions import SemanticAuditRecord
+from book2epub.semantic.decisions import SemanticAuditRecord, SemanticRelationAuditRecord
 from book2epub.semantic.hashing import compute_text_sha256
 from book2epub.semantic.models import SemanticEvidenceBlock
 from book2epub.semantic.reconcile import (
     ReconciledSemanticDecision,
     ReconciledStructureDecision,
+)
+from book2epub.semantic.relations import (
+    ReconciledRelation,
+    RelationKey,
+    deterministic_wrapper_id,
+    validate_relation,
 )
 
 logger = logging.getLogger(__name__)
@@ -771,3 +779,207 @@ def apply_semantic_decisions(
         new_blocks.append(blk)
 
     return new_blocks, audits
+
+
+def _relation_items(
+    relations: dict[RelationKey, ReconciledRelation] | list[ReconciledRelation],
+) -> list[ReconciledRelation]:
+    if isinstance(relations, dict):
+        return list(relations.values())
+    return list(relations)
+
+
+def _relation_audit(
+    relation: ReconciledRelation,
+    status: str,
+    reason: str | None = None,
+) -> SemanticRelationAuditRecord:
+    return SemanticRelationAuditRecord(
+        relation_id=(
+            f"relation-{relation.relation_type}-"
+            f"{'-'.join(relation.source_block_ids)}-"
+            f"{relation.target_block_id or 'none'}"
+        ),
+        relation_type=relation.relation_type,
+        source_block_ids=list(relation.source_block_ids),
+        target_block_id=relation.target_block_id,
+        confidence=relation.confidence,
+        evidence_codes=relation.evidence_codes,
+        provider="semantic",
+        model="semantic",
+        request_ids=relation.chunk_ids,
+        status=status,  # type: ignore[arg-type]
+        rejection_reason=reason,
+    )
+
+
+def _callout_subtype(
+    source_blocks: list[Block],
+    semantic_decisions: dict[str, ReconciledSemanticDecision],
+) -> str | None:
+    valid = {"note", "tip", "warning", "caution", "important", "sidebar"}
+    for block in source_blocks:
+        if isinstance(block, Callout):
+            return block.subtype
+        decision = semantic_decisions.get(block.id)
+        target = decision.target if decision else ""
+        if target.startswith("callout_"):
+            subtype = target.removeprefix("callout_")
+            if subtype in valid:
+                return subtype
+        if target == "sidebar":
+            return "sidebar"
+    return None
+
+
+def apply_semantic_relations(
+    blocks: list[Block],
+    relations: dict[RelationKey, ReconciledRelation] | list[ReconciledRelation],
+    semantic_decisions: dict[str, ReconciledSemanticDecision] | None = None,
+    auto_apply_threshold: float = 0.80,
+    single_vote_threshold: float = 0.85,
+) -> tuple[list[Block], list[SemanticRelationAuditRecord]]:
+    """Validate and apply reconciled Pass B relations without generating text."""
+    current = list(blocks)
+    audits: list[SemanticRelationAuditRecord] = []
+    decisions = semantic_decisions or {}
+    attached_caption_sources: dict[str, str] = {}
+    attached_footnote_sources: dict[str, str] = {}
+
+    relation_items = _relation_items(relations)
+    relation_items.sort(
+        key=lambda rel: (
+            min((next((i for i, block in enumerate(current) if block.id == sid), 10**9)
+                 for sid in rel.source_block_ids), default=10**9),
+            rel.relation_type,
+            tuple(rel.source_block_ids),
+        )
+    )
+
+    for relation in relation_items:
+        if relation.is_conflict:
+            audits.append(
+                _relation_audit(relation, "conflict", relation.conflict_details)
+            )
+            continue
+
+        threshold = single_vote_threshold if relation.single_vote else auto_apply_threshold
+        if relation.confidence < threshold:
+            audits.append(
+                _relation_audit(
+                    relation,
+                    "queued_visual",
+                    "Confidence below relation auto-apply threshold",
+                )
+            )
+            continue
+
+        blocks_by_id = {block.id: block for block in current}
+        block_order = {block.id: index for index, block in enumerate(current)}
+        valid, reason = validate_relation(relation, blocks_by_id, block_order)
+        if not valid:
+            audits.append(_relation_audit(relation, "rejected", reason))
+            continue
+
+        source_ids = relation.source_block_ids
+        target_id = relation.target_block_id
+        if relation.relation_type == "caption_of" or relation.relation_type == "footnote_of":
+            assert target_id is not None
+            source_id = source_ids[0]
+            source = blocks_by_id[source_id]
+            target = blocks_by_id[target_id]
+            source_inlines = _source_inlines_for_relation(source)
+            if source_inlines is None:
+                audits.append(
+                    _relation_audit(
+                        relation, "rejected", "source has no movable inline content"
+                    )
+                )
+                continue
+            attached = (
+                attached_caption_sources if relation.relation_type == "caption_of"
+                else attached_footnote_sources
+            )
+            previous_target = attached.get(source_id)
+            if previous_target is not None and previous_target != target_id:
+                audits.append(
+                    _relation_audit(
+                        relation,
+                        "rejected",
+                        "source is already attached to another target",
+                    )
+                )
+                continue
+            updated_field = "caption" if relation.relation_type == "caption_of" else "footnotes"
+            updated = target.model_copy(update={updated_field: source_inlines})
+            current[block_order[target_id]] = updated
+            attached[source_id] = target_id
+            current = [block for block in current if block.id != source_id]
+            audits.append(_relation_audit(relation, "applied"))
+            continue
+
+        if relation.relation_type in {"member_of_callout", "member_of_example"}:
+            source_blocks = [blocks_by_id[source_id] for source_id in source_ids]
+            existing_ids = {block.id for block in current}
+            wrapper_id = deterministic_wrapper_id(
+                relation.relation_type, source_ids, existing_ids
+            )
+            wrapper_sources = []
+            for source_block in source_blocks:
+                for source_ref in source_block.sources:
+                    if source_ref not in wrapper_sources:
+                        wrapper_sources.append(source_ref)
+            if relation.relation_type == "member_of_callout":
+                subtype = _callout_subtype(source_blocks, decisions)
+                if subtype is None:
+                    audits.append(
+                        _relation_audit(
+                            relation, "rejected", "no validated callout subtype"
+                        )
+                    )
+                    continue
+                wrapper: Block = Callout(
+                    id=wrapper_id,
+                    sources=wrapper_sources,
+                    subtype=subtype,  # type: ignore[arg-type]
+                    blocks=source_blocks,
+                )
+            else:
+                wrapper = ExampleBlock(
+                    id=wrapper_id,
+                    sources=wrapper_sources,
+                    blocks=source_blocks,
+                )
+            first_index = min(block_order[source_id] for source_id in source_ids)
+            current = [block for block in current if block.id not in set(source_ids)]
+            current.insert(first_index, wrapper)
+            audits.append(_relation_audit(relation, "applied"))
+            continue
+
+        if relation.relation_type == "paragraph_continuation":
+            assert target_id is not None
+            source = blocks_by_id[source_ids[0]]
+            target = blocks_by_id[target_id]
+            assert isinstance(source, Paragraph) and isinstance(target, Paragraph)
+            merged = source.model_copy(
+                update={
+                    "inlines": list(source.inlines)
+                    + [PageBoundary(page_idx=target.sources[0].page_idx)]
+                    + list(target.inlines),
+                    "sources": list(source.sources) + list(target.sources),
+                }
+            )
+            current[block_order[source.id]] = merged
+            current = [block for block in current if block.id != target.id]
+            audits.append(_relation_audit(relation, "applied"))
+            continue
+
+        audits.append(_relation_audit(relation, "rejected", "unsupported relation type"))
+
+    return current, audits
+
+
+def _source_inlines_for_relation(block: Block) -> list[Inline] | None:
+    if isinstance(block, (Paragraph, Heading, Footnote)):
+        return list(block.inlines)
+    return None

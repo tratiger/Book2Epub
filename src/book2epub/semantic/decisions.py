@@ -220,3 +220,21 @@ class SemanticAuditRecord(BaseModel):
     ]
     rejection_reason: str | None = None
     source_content_sha256: str = ""
+
+
+class SemanticRelationAuditRecord(BaseModel):
+    """Audit record for every proposed Pass B relation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relation_id: str
+    relation_type: RelationType
+    source_block_ids: list[str]
+    target_block_id: str | None = None
+    confidence: float
+    evidence_codes: list[str] = Field(default_factory=list)
+    provider: str
+    model: str
+    request_ids: list[str] = Field(default_factory=list)
+    status: Literal["proposed", "applied", "rejected", "conflict", "queued_visual"]
+    rejection_reason: str | None = None

@@ -20,6 +20,7 @@ from book2epub.providers.usage import record_provider_usage as _record_provider_
 from book2epub.qa.stage import StageState, record_stage_status
 from book2epub.semantic.apply import (
     apply_semantic_decisions,
+    apply_semantic_relations,
     apply_structure_decisions,
 )
 from book2epub.semantic.book_state import (
@@ -33,6 +34,7 @@ from book2epub.semantic.chunking import create_semantic_chunks
 from book2epub.semantic.decisions import (
     SemanticAuditRecord,
     SemanticDecisionBatch,
+    SemanticRelationAuditRecord,
 )
 from book2epub.semantic.hashing import compute_text_sha256
 from book2epub.semantic.models import (
@@ -50,6 +52,12 @@ from book2epub.semantic.reconcile import (
     ReconciledStructureDecision,
     reconcile_semantic_batches,
     reconcile_structure_batches,
+)
+from book2epub.semantic.relations import (
+    ReconciledRelation,
+    RelationKey,
+    reconcile_relation_batches,
+    validate_unique_block_ids,
 )
 from book2epub.semantic.schemas import build_provider_schema
 from book2epub.semantic.structure import (
@@ -98,6 +106,7 @@ def _semantic_cache_key(
         observation_contract={
             "schema_version": "1.0",
             "semantic_decision_schema_version": SEMANTIC_DECISION_SCHEMA_VERSION,
+            "relation_application_contract": "1.0",
             "schema_hash": compute_text_sha256(
                 json.dumps(
                     build_provider_schema(BookStateObservationBatch),
@@ -111,7 +120,11 @@ def _semantic_cache_key(
 
 def _load_reconciled_decisions(
     path: Path,
-) -> tuple[dict[str, ReconciledStructureDecision], dict[str, ReconciledSemanticDecision]]:
+) -> tuple[
+    dict[str, ReconciledStructureDecision],
+    dict[str, ReconciledSemanticDecision],
+    dict[RelationKey, ReconciledRelation],
+]:
     data = json.loads(path.read_text(encoding="utf-8"))
     struct = {
         block_id: ReconciledStructureDecision(**value)
@@ -121,7 +134,38 @@ def _load_reconciled_decisions(
         block_id: ReconciledSemanticDecision(**value)
         for block_id, value in data.get("pass_b", {}).items()
     }
-    return struct, semantic
+    relations = {
+        relation.key: relation
+        for relation in (
+            ReconciledRelation.from_dict(item)
+            for item in data.get("pass_b_relations", [])
+        )
+    }
+    return struct, semantic, relations
+
+
+def _relation_scope_audit(
+    relation: object,
+    chunk_id: str,
+    reason: str,
+) -> SemanticRelationAuditRecord:
+    return SemanticRelationAuditRecord(
+        relation_id=(
+            f"relation-{getattr(relation, 'relation_type', 'unknown')}-"
+            f"{'-'.join(getattr(relation, 'source_block_ids', []))}-"
+            f"{getattr(relation, 'target_block_id', None) or 'none'}"
+        ),
+        relation_type=getattr(relation, "relation_type"),
+        source_block_ids=list(getattr(relation, "source_block_ids", [])),
+        target_block_id=getattr(relation, "target_block_id", None),
+        confidence=float(getattr(relation, "confidence", 0.0)),
+        evidence_codes=list(getattr(relation, "evidence_codes", [])),
+        provider="semantic",
+        model="semantic",
+        request_ids=[chunk_id],
+        status="rejected",
+        rejection_reason=reason,
+    )
 
 
 def _materialize_cached_semantic_result(
@@ -135,7 +179,7 @@ def _materialize_cached_semantic_result(
     state_path: Path,
 ) -> SemanticStageResult:
     evidence_lookup = {b.block_id: b for b in evidence.blocks}
-    struct_decisions, semantic_decisions = _load_reconciled_decisions(reconciled_path)
+    struct_decisions, semantic_decisions, relations = _load_reconciled_decisions(reconciled_path)
     book_state = BookState.model_validate_json(state_path.read_text(encoding="utf-8"))
     intermediate_blocks, pass_a_audits = apply_structure_decisions(
         blocks=raw_ir.blocks,
@@ -143,13 +187,24 @@ def _materialize_cached_semantic_result(
         evidence_lookup=evidence_lookup,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
     )
-    outline = build_book_outline(intermediate_blocks)
     final_blocks, pass_b_audits = apply_semantic_decisions(
         blocks=intermediate_blocks,
         decisions=semantic_decisions,
         evidence_lookup=evidence_lookup,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
     )
+    final_blocks, relation_audits = apply_semantic_relations(
+        blocks=final_blocks,
+        relations=relations,
+        semantic_decisions=semantic_decisions,
+        auto_apply_threshold=cfg.semantic.auto_apply_threshold,
+    )
+    duplicate_ids = validate_unique_block_ids(final_blocks)
+    if duplicate_ids:
+        raise ValueError(
+            "Semantic relation application produced duplicate IDs: " + "; ".join(duplicate_ids)
+        )
+    outline = build_book_outline(final_blocks)
     semantic_ir = raw_ir.model_copy(update={"blocks": final_blocks})
     audits = pass_a_audits + pass_b_audits
     paths.semantic_outline_json.write_text(outline.model_dump_json(indent=2), encoding="utf-8")
@@ -162,6 +217,9 @@ def _materialize_cached_semantic_result(
     )
     paths.semantic_applied_json.write_text(
         json.dumps([a.model_dump() for a in audits], indent=2), encoding="utf-8"
+    )
+    paths.semantic_relations_json.write_text(
+        json.dumps([a.model_dump() for a in relation_audits], indent=2), encoding="utf-8"
     )
     record_stage_status(
         paths.semantic_stage_json,
@@ -188,6 +246,7 @@ def _materialize_cached_semantic_result(
         conflict_count=sum(1 for a in audits if "conflict" in a.status),
         struct_decisions=struct_decisions,
         semantic_decisions=semantic_decisions,
+        relation_audits=relation_audits,
     )
 
 
@@ -206,6 +265,7 @@ class SemanticStageResult:
     conflict_count: int
     struct_decisions: dict[str, ReconciledStructureDecision] = field(default_factory=dict)
     semantic_decisions: dict[str, ReconciledSemanticDecision] = field(default_factory=dict)
+    relation_audits: list[SemanticRelationAuditRecord] = field(default_factory=list)
 
 
 def run_semantic_reconstruction(
@@ -388,6 +448,7 @@ def run_semantic_reconstruction(
     pass_b_dir = paths.semantic_decisions_dir / "pass-b"
     pass_b_dir.mkdir(parents=True, exist_ok=True)
     pass_b_batches: list[SemanticDecisionBatch] = []
+    relation_scope_audits: list[SemanticRelationAuditRecord] = []
 
     running_book_state = book_state
     observation_dir = paths.semantic_dir / "book-state-observations"
@@ -418,6 +479,7 @@ def run_semantic_reconstruction(
         )
 
         batch_b, inf_b = provider.infer(req, SemanticDecisionBatch)
+        raw_relations = list(batch_b.relations)
 
         # Scope validation for Pass B
         try:
@@ -429,6 +491,24 @@ def run_semantic_reconstruction(
                     len(violations),
                 )
             batch_b = filter_out_of_scope_semantic_decisions(batch_b, chunk)
+            accepted_relation_keys = {
+                (rel.relation_type, tuple(rel.source_block_ids), rel.target_block_id)
+                for rel in batch_b.relations
+            }
+            for relation in raw_relations:
+                relation_identity = (
+                    relation.relation_type,
+                    tuple(relation.source_block_ids),
+                    relation.target_block_id,
+                )
+                if relation_identity not in accepted_relation_keys:
+                    relation_scope_audits.append(
+                        _relation_scope_audit(
+                            relation,
+                            chunk.chunk_id,
+                            "Relation failed chunk scope or duplicate validation",
+                        )
+                    )
             accepted_observations: list[BookStateObservationBatch] = []
             for obs in batch_b.observations:
                 observation_violations = validate_book_state_observation_scope(obs, chunk)
@@ -464,6 +544,14 @@ def run_semantic_reconstruction(
                 chunk_id=chunk.chunk_id,
                 decisions=[],
             )
+            relation_scope_audits.extend(
+                _relation_scope_audit(
+                    relation,
+                    chunk.chunk_id,
+                    f"Relation batch scope validation failed: {exc}",
+                )
+                for relation in raw_relations
+            )
 
         pass_b_batches.append(batch_b)
 
@@ -489,13 +577,30 @@ def run_semantic_reconstruction(
 
     # Reconcile Pass B decisions
     reconciled_sem, sem_conflicts = reconcile_semantic_batches(pass_b_batches, overlap_ids)
+    reconciled_relations, relation_conflicts = reconcile_relation_batches(
+        pass_b_batches, overlap_ids
+    )
 
     # Save reconciled decisions
     reconciled_summary = {
         "pass_a": {k: v.__dict__ for k, v in reconciled_struct.items()},
         "pass_b": {k: v.__dict__ for k, v in reconciled_sem.items()},
+        "pass_b_relations": [
+            relation.to_dict() for relation in reconciled_relations.values()
+        ],
         "pass_a_conflicts": [c.model_dump() for c in struct_conflicts],
         "pass_b_conflicts": [c.model_dump() for c in sem_conflicts],
+        "pass_b_relation_conflicts": [
+            {
+                "source_block_ids": list(conflict.source_block_ids),
+                "relation_keys": [
+                    [key[0], list(key[1]), key[2]] for key in conflict.relation_keys
+                ],
+                "chunk_ids": conflict.chunk_ids,
+                "reason": conflict.reason,
+            }
+            for conflict in relation_conflicts
+        ],
     }
     (paths.semantic_decisions_dir / "reconciled.json").write_text(
         json.dumps(reconciled_summary, indent=2), encoding="utf-8"
@@ -507,9 +612,25 @@ def run_semantic_reconstruction(
         evidence_lookup=evidence_lookup,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
     )
+    final_blocks, relation_apply_audits = apply_semantic_relations(
+        blocks=final_blocks,
+        relations=reconciled_relations,
+        semantic_decisions=reconciled_sem,
+        auto_apply_threshold=cfg.semantic.auto_apply_threshold,
+    )
+    relation_audits = relation_scope_audits + relation_apply_audits
+    duplicate_ids = validate_unique_block_ids(final_blocks)
+    if duplicate_ids:
+        raise ValueError(
+            "Semantic relation application produced duplicate IDs: " + "; ".join(duplicate_ids)
+        )
 
     # 6. Final Outputs and Metrics
     semantic_ir = raw_ir.model_copy(update={"blocks": final_blocks})
+    final_outline = build_book_outline(final_blocks)
+    paths.semantic_outline_json.write_text(
+        final_outline.model_dump_json(indent=2), encoding="utf-8"
+    )
     paths.ir_semantic_json.write_text(semantic_ir.model_dump_json(indent=2), encoding="utf-8")
 
     all_audits = pass_a_audits + pass_b_audits
@@ -530,6 +651,9 @@ def run_semantic_reconstruction(
     # M9-updated version if visual arbitration runs.
     paths.semantic_applied_json.write_text(
         json.dumps([a.model_dump() for a in all_audits], indent=2), encoding="utf-8"
+    )
+    paths.semantic_relations_json.write_text(
+        json.dumps([a.model_dump() for a in relation_audits], indent=2), encoding="utf-8"
     )
 
     # Cache only source-grounded decisions/state.  Re-materialization on a later
@@ -552,14 +676,14 @@ def run_semantic_reconstruction(
     applied_count = sum(1 for a in all_audits if a.status == "applied")
     preserved_count = sum(1 for a in all_audits if "preserved" in a.status)
     low_conf_count = sum(1 for a in all_audits if a.status == "preserved_original_low_confidence")
-    total_conflicts = len(struct_conflicts) + len(sem_conflicts)
+    total_conflicts = len(struct_conflicts) + len(sem_conflicts) + len(relation_conflicts)
 
     # Suppress unused variable warning (chunk_by_id used for scope validation)
     _ = chunk_by_id
 
     return SemanticStageResult(
         bookir=semantic_ir,
-        outline=provisional_outline,
+        outline=final_outline,
         book_state=book_state,
         audits=all_audits,
         reviewed_blocks_count=len(raw_ir.blocks),
@@ -569,4 +693,5 @@ def run_semantic_reconstruction(
         conflict_count=total_conflicts,
         struct_decisions=reconciled_struct,
         semantic_decisions=reconciled_sem,
+        relation_audits=relation_audits,
     )

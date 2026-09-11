@@ -7,10 +7,25 @@ from book2epub.semantic.decisions import (
     SemanticConflict,
     SemanticDecisionBatch,
 )
+from book2epub.semantic.relations import (
+    ReconciledRelation,
+    RelationConflict,
+    reconcile_relation_batches,
+)
 from book2epub.semantic.structure import (
     StructureDecision,
     StructureDecisionBatch,
 )
+
+__all__ = [
+    "ReconciledRelation",
+    "RelationConflict",
+    "reconcile_relation_batches",
+    "ReconciledStructureDecision",
+    "ReconciledSemanticDecision",
+    "reconcile_structure_batches",
+    "reconcile_semantic_batches",
+]
 
 
 @dataclass

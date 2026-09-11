@@ -20,6 +20,7 @@ from book2epub.semantic.book_state import (
 )
 from book2epub.semantic.chunking import SemanticChunkInput
 from book2epub.semantic.decisions import SemanticDecisionBatch
+from book2epub.semantic.relations import relation_key
 from book2epub.semantic.structure import StructureDecisionBatch
 
 logger = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ def validate_semantic_batch_scope(
             logger.warning(violation)
             violations.append(violation)
 
-    # 3. Every block_id and related_block_ids must belong to this chunk
+    # 3. Every block_id and legacy related_block_ids must belong to this chunk
     for dec in batch.decisions:
         if dec.block_id not in valid_ids:
             violation = (
@@ -161,6 +162,39 @@ def validate_semantic_batch_scope(
                 logger.warning(violation)
                 violations.append(violation)
 
+    relation_counts = Counter(relation_key(rel) for rel in batch.relations)
+    for rel in batch.relations:
+        relation_violations = validate_relation_scope(rel, chunk)
+        if relation_counts[relation_key(rel)] > 1:
+            relation_violations.append(
+                f"Duplicate semantic relation {relation_key(rel)!r} in chunk {expected_chunk_id!r}"
+            )
+        violations.extend(relation_violations)
+
+    return violations
+
+
+def validate_relation_scope(rel: object, chunk: SemanticChunkInput) -> list[str]:
+    """Validate relation source/target IDs against one exact chunk scope."""
+    valid_ids = _chunk_block_ids(chunk)
+    violations: list[str] = []
+    source_ids = list(getattr(rel, "source_block_ids", []))
+    target_id = getattr(rel, "target_block_id", None)
+    if not source_ids:
+        violations.append("Semantic relation has no source_block_ids")
+    if len(source_ids) != len(set(source_ids)):
+        violations.append("Semantic relation contains duplicate source_block_ids")
+    for source_id in source_ids:
+        if source_id not in valid_ids:
+            violations.append(
+                f"Semantic relation source_block_id={source_id!r} is not in chunk "
+                f"{chunk.chunk_id!r}"
+            )
+    if target_id is not None and target_id not in valid_ids:
+        violations.append(
+            f"Semantic relation target_block_id={target_id!r} is not in chunk "
+            f"{chunk.chunk_id!r}"
+        )
     return violations
 
 
@@ -251,11 +285,23 @@ def filter_out_of_scope_semantic_decisions(
 
         good_decisions.append(d)
 
+    good_relations = []
+    relation_counts = Counter(relation_key(rel) for rel in batch.relations)
+    for rel in batch.relations:
+        if validate_relation_scope(rel, chunk) or relation_counts[relation_key(rel)] > 1:
+            logger.warning(
+                "Filtered invalid or duplicate semantic relation in chunk %s: %s",
+                chunk.chunk_id,
+                relation_key(rel),
+            )
+            continue
+        good_relations.append(rel)
+
     return SemanticDecisionBatch(
         schema_version=batch.schema_version,
         chunk_id=batch.chunk_id,
         decisions=good_decisions,
-        relations=batch.relations,
+        relations=good_relations,
         observations=batch.observations,
     )
 
