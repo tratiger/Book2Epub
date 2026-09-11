@@ -15,12 +15,12 @@ from book2epub.ir.models import (
     extract_inline_visible_text,
 )
 from book2epub.semantic.hashing import compute_content_sha256, compute_text_sha256
+from book2epub.semantic.materializers import allowed_targets_for
 from book2epub.semantic.models import (
     EvidenceLine,
     EvidenceSegment,
     SemanticEvidenceBlock,
     SemanticEvidenceBook,
-    SemanticTarget,
 )
 
 SHELL_PROMPT_PATTERNS = [
@@ -155,104 +155,6 @@ def _extract_evidence_lines(raw_block: dict[str, Any]) -> list[EvidenceLine]:
 
     collect(raw_block)
     return result
-
-
-def _compute_allowed_targets(
-    source_type: str,
-    current_kind: str,
-    preformatted_text: str | None,
-    table_html_available: bool,
-) -> list[SemanticTarget]:
-    """
-    Compute allowed semantic target types based on source and evidence availability
-    (M6 spec Section 5).
-    """
-    targets: list[SemanticTarget] = ["keep", "keep_original"]
-    has_pre = bool(preformatted_text and preformatted_text.strip())
-
-    preformatted_subtypes: list[SemanticTarget] = [
-        "source_code",
-        "shell_command",
-        "terminal_output",
-        "terminal_session",
-        "repl_session",
-        "log_output",
-        "config_file",
-        "generic_preformatted",
-    ]
-
-    prose_targets: list[SemanticTarget] = [
-        "paragraph",
-        "heading",
-        "list",
-        "unordered_list",
-        "ordered_list",
-        "callout_note",
-        "callout_tip",
-        "callout_warning",
-        "callout_caution",
-        "callout_important",
-        "sidebar",
-        "quote",
-        "block_quote",
-        "definition_list",
-    ]
-
-    if source_type in ("title", "heading") or current_kind == "heading":
-        targets.extend(prose_targets)
-        if has_pre:
-            targets.extend(preformatted_subtypes)
-        if table_html_available:
-            targets.append("table")
-
-    elif source_type in ("text", "paragraph") or current_kind == "paragraph":
-        targets.extend(prose_targets)
-        if has_pre:
-            targets.extend(preformatted_subtypes)
-        if table_html_available:
-            targets.append("table")
-
-    elif source_type == "table" or current_kind == "table":
-        targets.append("table")
-        if has_pre:
-            targets.append("paragraph")
-            targets.extend(preformatted_subtypes)
-
-    elif source_type in ("code", "algorithm") or current_kind == "code":
-        targets.append("paragraph")
-        targets.extend(preformatted_subtypes)
-
-    elif source_type in ("image", "chart") or current_kind in ("figure", "chart"):
-        targets.extend(["figure", "chart"])
-
-    elif source_type in ("interline_equation", "display_math") or current_kind == "display_math":
-        targets.append("display_math")
-
-    elif source_type == "list" or current_kind == "list":
-        targets.extend(["list", "unordered_list", "ordered_list", "paragraph", "definition_list"])
-
-    elif source_type == "aside" or current_kind == "aside":
-        targets.extend([
-            "callout_note",
-            "callout_tip",
-            "callout_warning",
-            "callout_caution",
-            "callout_important",
-            "sidebar",
-            "paragraph",
-        ])
-
-    else:
-        targets.append("paragraph")
-
-    # Remove duplicates while preserving order
-    seen: set[str] = set()
-    deduped: list[SemanticTarget] = []
-    for t in targets:
-        if t not in seen:
-            seen.add(t)
-            deduped.append(t)
-    return deduped
 
 
 def _compute_flags(
@@ -442,13 +344,6 @@ def build_semantic_evidence(
             footnote_text=footnote_text,
         )
 
-        allowed_targets = _compute_allowed_targets(
-            source_type=src_type,
-            current_kind=ir_block.kind,
-            preformatted_text=preformatted_text,
-            table_html_available=table_html_available,
-        )
-
         flags = _compute_flags(
             source_type=src_type,
             current_kind=ir_block.kind,
@@ -499,11 +394,15 @@ def build_semantic_evidence(
             caption_inlines_snapshot=caption_inlines_snapshot,
             footnote_inlines_snapshot=footnote_inlines_snapshot,
             content_sha256=content_hash,
-            allowed_targets=allowed_targets,
+            allowed_targets=[],
             flags=flags,
             source_extensions_summary=s_ref.raw_extensions if s_ref else {},
         )
-        evidence_blocks.append(evidence_block)
+        evidence_blocks.append(
+            evidence_block.model_copy(
+                update={"allowed_targets": allowed_targets_for(ir_block, evidence_block)}
+            )
+        )
 
     return SemanticEvidenceBook(
         source_middle_sha256=source_middle_sha256,

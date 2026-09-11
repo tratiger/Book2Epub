@@ -5,6 +5,7 @@ import logging
 
 from book2epub.errors import SemanticError
 from book2epub.ir.models import (
+    Aside,
     Block,
     BlockQuote,
     Callout,
@@ -28,6 +29,7 @@ from book2epub.ir.models import (
 )
 from book2epub.semantic.decisions import SemanticAuditRecord, SemanticRelationAuditRecord
 from book2epub.semantic.hashing import compute_text_sha256
+from book2epub.semantic.materializers import materializer_for
 from book2epub.semantic.models import SemanticEvidenceBlock
 from book2epub.semantic.reconcile import (
     ReconciledSemanticDecision,
@@ -66,7 +68,7 @@ def extract_block_visible_text(block: Block) -> str:
     node which contains HTML. Returning an empty string here for Table is
     intentional so callers that need Table content must use the evidence source.
     """
-    if isinstance(block, (Paragraph, Heading)):
+    if isinstance(block, (Paragraph, Heading, Aside)):
         return extract_inlines_text(block.inlines)
     elif isinstance(block, CodeBlock):
         return block.text
@@ -77,7 +79,7 @@ def extract_block_visible_text(block: Block) -> str:
     elif isinstance(block, BlockQuote):
         return "".join(extract_block_visible_text(b) for b in block.blocks)
     elif isinstance(block, ListBlock):
-        return "".join(extract_inlines_text(item) for item in block.items)
+        return "\n".join(extract_inlines_text(item) for item in block.items)
     # Table: visible text is in HTML source, not directly comparable via this helper.
     # Callers must use SemanticEvidenceBlock.preformatted_text for Table content.
     return ""
@@ -522,6 +524,71 @@ def apply_semantic_decisions(
                 new_blocks.append(blk)
                 continue
 
+        materializer = materializer_for(blk, target, ev)
+        if materializer is None:
+            rejected_blk, audit = _reject_invalid(
+                blk,
+                source_kind,
+                target,
+                dec,
+                hash_before,
+                reason=f"No deterministic materializer for {source_kind} -> {target}",
+            )
+            audits.append(audit)
+            new_blocks.append(rejected_blk)
+            continue
+
+        try:
+            materialized = materializer.apply(blk, ev, dec)
+            materialized_blocks = materialized if isinstance(materialized, list) else [materialized]
+            if not materialized_blocks:
+                raise ValueError("materializer returned no blocks")
+            if target not in {"table"}:
+                expected_text = (
+                    ev.preformatted_text
+                    if isinstance(blk, Table) and target in _PREFORMATTED_SUBTYPES
+                    else extract_block_visible_text(blk)
+                )
+                actual_text = "\n".join(
+                    "\n".join(extract_inlines_text(item) for item in block.items)
+                    if isinstance(block, ListBlock)
+                    else extract_block_visible_text(block)
+                    for block in materialized_blocks
+                )
+                if expected_text != actual_text:
+                    raise ValueError("materializer changed user-visible source content")
+        except (SemanticError, ValueError) as exc:
+            rejected_blk, audit = _reject_invalid(
+                blk,
+                source_kind,
+                target,
+                dec,
+                hash_before,
+                reason=f"Materializer rejected target: {exc}",
+            )
+            audits.append(audit)
+            new_blocks.append(rejected_blk)
+            continue
+
+        new_blocks.extend(materialized_blocks)
+        audits.append(
+            SemanticAuditRecord(
+                decision_id=f"pass-b-{blk.id}",
+                block_id=blk.id,
+                source_kind=source_kind,
+                proposed_target=target,
+                final_target=target,
+                confidence=dec.confidence,
+                evidence_codes=dec.evidence_codes,
+                provider="semantic",
+                model="semantic",
+                request_ids=dec.chunk_ids,
+                status="applied",
+                source_content_sha256=hash_before,
+            )
+        )
+        continue
+
         # ------------------------------------------------------------------ #
         # 1. table -> preformatted (terminal_output, shell_command, etc.)     #
         # ------------------------------------------------------------------ #
@@ -540,7 +607,7 @@ def apply_semantic_decisions(
             new_blk = PreformattedBlock(
                 id=blk.id,
                 sources=blk.sources,
-                subtype=target,  # type: ignore[arg-type]
+                subtype=target,
                 text=ev.preformatted_text,
                 caption=list(blk.caption),
                 footnotes=list(blk.footnotes),
@@ -571,7 +638,7 @@ def apply_semantic_decisions(
             new_blk = PreformattedBlock(
                 id=blk.id,
                 sources=blk.sources,
-                subtype=target,  # type: ignore[arg-type]
+                subtype=target,
                 text=blk.text,
                 language=blk.language,
                 caption=list(blk.caption),
@@ -639,7 +706,7 @@ def apply_semantic_decisions(
             new_callout = Callout(
                 id=wrapper_id,
                 sources=blk.sources,
-                subtype=callout_sub,  # type: ignore[arg-type]
+                subtype=callout_sub,
                 blocks=[blk],
             )
             text_after = extract_block_visible_text(new_callout)
@@ -794,8 +861,18 @@ def apply_semantic_decisions(
                 )
                 continue
 
-        # Default: keep original (target was allowed but no specific case handled it)
-        new_blocks.append(blk)
+        # Defensive fallback: every advertised target must have gone through
+        # the canonical registry above. Never silently preserve a decision.
+        rejected_blk, audit = _reject_invalid(
+            blk,
+            source_kind,
+            target,
+            dec,
+            hash_before,
+            reason=f"No deterministic materializer for {source_kind} -> {target}",
+        )
+        audits.append(audit)
+        new_blocks.append(rejected_blk)
 
     return new_blocks, audits
 
