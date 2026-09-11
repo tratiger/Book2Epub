@@ -8,8 +8,10 @@ from book2epub.ir.models import (
     Block,
     BlockQuote,
     Callout,
+    Chart,
     CodeBlock,
     ExampleBlock,
+    Figure,
     Footnote,
     Heading,
     Hyperlink,
@@ -383,6 +385,7 @@ def apply_semantic_decisions(
     evidence_lookup: dict[str, SemanticEvidenceBlock],
     auto_apply_threshold: float = 0.80,
     single_vote_threshold: float = 0.85,
+    defer_relation_group_block_ids: set[str] | None = None,
 ) -> tuple[list[Block], list[SemanticAuditRecord]]:
     """
     Apply Pass B semantic block decisions (table -> preformatted, code subtype, callout, etc.).
@@ -396,6 +399,7 @@ def apply_semantic_decisions(
     """
     new_blocks: list[Block] = []
     audits: list[SemanticAuditRecord] = []
+    deferred_group_ids = defer_relation_group_block_ids or set()
 
     for blk in blocks:
         dec = decisions.get(blk.id)
@@ -476,6 +480,14 @@ def apply_semantic_decisions(
             )
             new_blocks.append(blk)
             continue
+
+        # A high-confidence member_of_callout relation owns grouping for these
+        # source blocks. Keep the original paragraph until relation application;
+        # otherwise Paragraph->Callout would create a duplicate wrapper/child ID.
+        if target.startswith("callout_") or target == "sidebar":
+            if blk.id in deferred_group_ids:
+                new_blocks.append(blk)
+                continue
 
         # ------------------------------------------------------------------ #
         # HARD GATE: allowed_targets check — must happen before any case       #
@@ -816,12 +828,21 @@ def _relation_audit(
 def _callout_subtype(
     source_blocks: list[Block],
     semantic_decisions: dict[str, ReconciledSemanticDecision],
+    auto_apply_threshold: float,
+    single_vote_threshold: float,
 ) -> str | None:
     valid = {"note", "tip", "warning", "caution", "important", "sidebar"}
     for block in source_blocks:
         if isinstance(block, Callout):
             return block.subtype
         decision = semantic_decisions.get(block.id)
+        if decision is None or decision.is_conflict:
+            continue
+        decision_threshold = (
+            single_vote_threshold if decision.single_vote else auto_apply_threshold
+        )
+        if decision.confidence < decision_threshold:
+            continue
         target = decision.target if decision else ""
         if target.startswith("callout_"):
             subtype = target.removeprefix("callout_")
@@ -911,7 +932,19 @@ def apply_semantic_relations(
                 )
                 continue
             updated_field = "caption" if relation.relation_type == "caption_of" else "footnotes"
-            updated = target.model_copy(update={updated_field: source_inlines})
+            if relation.relation_type == "caption_of":
+                updated_inlines = source_inlines
+            else:
+                assert isinstance(target, (Figure, Chart, Table, CodeBlock, PreformattedBlock))
+                existing_footnotes = list(target.footnotes)
+                updated_inlines = existing_footnotes[:]
+                for inline in source_inlines:
+                    if not any(
+                        existing_inline.model_dump() == inline.model_dump()
+                        for existing_inline in updated_inlines
+                    ):
+                        updated_inlines.append(inline)
+            updated = target.model_copy(update={updated_field: updated_inlines})
             current[block_order[target_id]] = updated
             attached[source_id] = target_id
             current = [block for block in current if block.id != source_id]
@@ -930,7 +963,12 @@ def apply_semantic_relations(
                     if source_ref not in wrapper_sources:
                         wrapper_sources.append(source_ref)
             if relation.relation_type == "member_of_callout":
-                subtype = _callout_subtype(source_blocks, decisions)
+                subtype = _callout_subtype(
+                    source_blocks,
+                    decisions,
+                    auto_apply_threshold,
+                    single_vote_threshold,
+                )
                 if subtype is None:
                     audits.append(
                         _relation_audit(

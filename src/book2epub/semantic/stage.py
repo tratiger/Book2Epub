@@ -124,6 +124,7 @@ def _load_reconciled_decisions(
     dict[str, ReconciledStructureDecision],
     dict[str, ReconciledSemanticDecision],
     dict[RelationKey, ReconciledRelation],
+    list[SemanticRelationAuditRecord],
 ]:
     data = json.loads(path.read_text(encoding="utf-8"))
     struct = {
@@ -141,7 +142,27 @@ def _load_reconciled_decisions(
             for item in data.get("pass_b_relations", [])
         )
     }
-    return struct, semantic, relations
+    relation_scope_audits = [
+        SemanticRelationAuditRecord.model_validate(item)
+        for item in data.get("pass_b_relation_scope_audits", [])
+    ]
+    return struct, semantic, relations, relation_scope_audits
+
+
+def _deferred_relation_group_ids(
+    relations: dict[RelationKey, ReconciledRelation],
+    auto_apply_threshold: float,
+    single_vote_threshold: float = 0.85,
+) -> set[str]:
+    """Return callout members whose relation owns the single wrapper materialization."""
+    deferred: set[str] = set()
+    for relation in relations.values():
+        if relation.relation_type != "member_of_callout" or relation.is_conflict:
+            continue
+        threshold = single_vote_threshold if relation.single_vote else auto_apply_threshold
+        if relation.confidence >= threshold:
+            deferred.update(relation.source_block_ids)
+    return deferred
 
 
 def _relation_scope_audit(
@@ -179,7 +200,12 @@ def _materialize_cached_semantic_result(
     state_path: Path,
 ) -> SemanticStageResult:
     evidence_lookup = {b.block_id: b for b in evidence.blocks}
-    struct_decisions, semantic_decisions, relations = _load_reconciled_decisions(reconciled_path)
+    (
+        struct_decisions,
+        semantic_decisions,
+        relations,
+        relation_scope_audits,
+    ) = _load_reconciled_decisions(reconciled_path)
     book_state = BookState.model_validate_json(state_path.read_text(encoding="utf-8"))
     intermediate_blocks, pass_a_audits = apply_structure_decisions(
         blocks=raw_ir.blocks,
@@ -192,13 +218,17 @@ def _materialize_cached_semantic_result(
         decisions=semantic_decisions,
         evidence_lookup=evidence_lookup,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
+        defer_relation_group_block_ids=_deferred_relation_group_ids(
+            relations, cfg.semantic.auto_apply_threshold
+        ),
     )
-    final_blocks, relation_audits = apply_semantic_relations(
+    final_blocks, relation_apply_audits = apply_semantic_relations(
         blocks=final_blocks,
         relations=relations,
         semantic_decisions=semantic_decisions,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
     )
+    relation_audits = relation_scope_audits + relation_apply_audits
     duplicate_ids = validate_unique_block_ids(final_blocks)
     if duplicate_ids:
         raise ValueError(
@@ -601,6 +631,9 @@ def run_semantic_reconstruction(
             }
             for conflict in relation_conflicts
         ],
+        "pass_b_relation_scope_audits": [
+            audit.model_dump() for audit in relation_scope_audits
+        ],
     }
     (paths.semantic_decisions_dir / "reconciled.json").write_text(
         json.dumps(reconciled_summary, indent=2), encoding="utf-8"
@@ -611,6 +644,9 @@ def run_semantic_reconstruction(
         decisions=reconciled_sem,
         evidence_lookup=evidence_lookup,
         auto_apply_threshold=cfg.semantic.auto_apply_threshold,
+        defer_relation_group_block_ids=_deferred_relation_group_ids(
+            reconciled_relations, cfg.semantic.auto_apply_threshold
+        ),
     )
     final_blocks, relation_apply_audits = apply_semantic_relations(
         blocks=final_blocks,

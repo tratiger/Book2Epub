@@ -14,7 +14,7 @@ from book2epub.ir.models import (
     Text,
 )
 from book2epub.qa.semantic import build_preservation_ledger
-from book2epub.semantic.apply import apply_semantic_relations
+from book2epub.semantic.apply import apply_semantic_decisions, apply_semantic_relations
 from book2epub.semantic.decisions import (
     SemanticDecisionBatch,
     SemanticRelationAuditRecord,
@@ -109,6 +109,33 @@ def test_footnote_attach_preserves_source_segment_provenance() -> None:
     assert attached.source_segments[0].text_sha256 == "source-hash"
 
 
+def test_multiple_footnotes_append_and_exact_duplicates_are_deduped() -> None:
+    first = _paragraph("fn-a", "First note", page_idx=0)
+    second = _paragraph("fn-b", "Second note", page_idx=0)
+    figure = Figure(id="figure", sources=[_source(0)], asset_id="asset")
+    updated, audits = apply_semantic_relations(
+        [first, second, figure],
+        [
+            _relation("footnote_of", ["fn-a"], "figure"),
+            _relation("footnote_of", ["fn-b"], "figure"),
+        ],
+    )
+    assert [audit.status for audit in audits] == ["applied", "applied"]
+    assert len(updated) == 1
+    assert [inline.text for inline in updated[0].footnotes if isinstance(inline, Text)] == [
+        "First note",
+        "Second note",
+    ]
+
+    duplicate_source = _paragraph("fn-c", "Second note", page_idx=0)
+    deduped, duplicate_audits = apply_semantic_relations(
+        [*updated, duplicate_source],
+        [_relation("footnote_of", ["fn-c"], "figure")],
+    )
+    assert duplicate_audits[0].status == "applied"
+    assert len(deduped[0].footnotes) == 2
+
+
 def test_callout_contiguous_group_gets_deterministic_wrapper_and_keeps_children() -> None:
     first = _paragraph("p1", "Warning:", page_idx=0)
     second = _paragraph("p2", "Do not delete the cache.", page_idx=0)
@@ -148,6 +175,59 @@ def test_callout_group_crossing_heading_is_rejected() -> None:
         },
     )
     assert [block.id for block in updated] == ["p1", "heading", "p2"]
+    assert audits[0].status == "rejected"
+
+
+def test_production_callout_group_suppresses_single_block_wrapper() -> None:
+    first = _paragraph("p1", "Warning", page_idx=0)
+    second = _paragraph("p2", "Details", page_idx=0)
+    decision = ReconciledSemanticDecision(
+        block_id="p1",
+        target="callout_warning",
+        heading_level=None,
+        confidence=0.95,
+    )
+    evidence = {
+        "p1": SemanticEvidenceBlock(
+            block_id="p1",
+            allowed_targets=["callout_warning"],
+            plain_text="Warning",
+        )
+    }
+    materialized, block_audits = apply_semantic_decisions(
+        [first, second],
+        {"p1": decision},
+        evidence,
+        defer_relation_group_block_ids={"p1"},
+    )
+    assert [block.id for block in materialized] == ["p1", "p2"]
+    assert block_audits == []
+
+    grouped, relation_audits = apply_semantic_relations(
+        materialized,
+        [_relation("member_of_callout", ["p1", "p2"], None)],
+        semantic_decisions={"p1": decision},
+    )
+    assert relation_audits[0].status == "applied"
+    assert isinstance(grouped[0], Callout)
+    assert [child.id for child in grouped[0].blocks] == ["p1", "p2"]
+
+
+def test_low_confidence_callout_decision_cannot_supply_group_subtype() -> None:
+    first = _paragraph("p1", "Warning", page_idx=0)
+    second = _paragraph("p2", "Details", page_idx=0)
+    low_confidence = ReconciledSemanticDecision(
+        block_id="p1",
+        target="callout_warning",
+        heading_level=None,
+        confidence=0.50,
+    )
+    grouped, audits = apply_semantic_relations(
+        [first, second],
+        [_relation("member_of_callout", ["p1", "p2"], None)],
+        semantic_decisions={"p1": low_confidence},
+    )
+    assert [block.id for block in grouped] == ["p1", "p2"]
     assert audits[0].status == "rejected"
 
 

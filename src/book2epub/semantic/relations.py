@@ -235,7 +235,9 @@ def validate_relation(
             return False, "target does not support caption or footnote inlines"
         existing = target.caption if rel.relation_type == "caption_of" else target.footnotes
         source_inlines = _source_inlines(source) or []
-        if existing and not _same_inlines(existing, source_inlines):
+        if rel.relation_type == "caption_of" and existing and not _same_inlines(
+            existing, source_inlines
+        ):
             return False, f"target already has a different {rel.relation_type}"
         return True, ""
 
