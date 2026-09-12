@@ -302,6 +302,68 @@ def test_preservation_rejects_source_backed_merge_with_modified_segment_text() -
     assert "Text mismatch" in (entry.reason or "")
 
 
+def test_preservation_rejects_source_backed_merge_with_reordered_segments() -> None:
+    seg1 = SourceTextSegment(
+        segment_id="p1-s1",
+        page_idx=0,
+        block_id="p1",
+        text="first",
+        text_sha256=compute_text_sha256("first"),
+    )
+    seg2 = SourceTextSegment(
+        segment_id="p1-s2",
+        page_idx=0,
+        block_id="p1",
+        text="second",
+        text_sha256=compute_text_sha256("second"),
+    )
+    seg3 = SourceTextSegment(
+        segment_id="p2-s1",
+        page_idx=1,
+        block_id="p2",
+        text="third",
+        text_sha256=compute_text_sha256("third"),
+    )
+    evidence = SemanticEvidenceBook(
+        source_middle_sha256="m",
+        raw_bookir_sha256="r",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="p1",
+                order_index=0,
+                page_idx=0,
+                source_type="text",
+                plain_text="first second",
+                source_segments=[seg1, seg2],
+            ),
+            SemanticEvidenceBlock(
+                block_id="p2",
+                order_index=1,
+                page_idx=1,
+                source_type="text",
+                plain_text="third",
+                source_segments=[seg3],
+            ),
+        ],
+    )
+    reordered = Paragraph(
+        id="p1",
+        inlines=[
+            # Visible text is unchanged, but provenance order is not.
+            Text(text="first second", source_segments=[seg2, seg1]),
+            PageBoundary(page_idx=1),
+            Text(text="third", source_segments=[seg3]),
+        ],
+    )
+    ledger = build_preservation_ledger(
+        evidence,
+        BookIR(source=SourceDocument(page_count=2), blocks=[reordered]),
+    )
+
+    entry = next(item for item in ledger if item.source_block_id == "p1")
+    assert "Text mismatch" in (entry.reason or "")
+
+
 def test_preservation_compares_code_body_separately_from_caption() -> None:
     caption = r"\$ ls -l outline.01"
     body = "-rwxr-x--- 1 molay users 1064 Jun 29 00:39 outline.01"

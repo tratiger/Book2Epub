@@ -271,6 +271,7 @@ def _source_backed_paragraph_merge_is_valid(
     # Every source block in the chain must expose authoritative segments.  A
     # correct block_id alone is not enough to excuse generated or altered text.
     authoritative_by_id: dict[str, Any] = {}
+    authoritative_segments: list[Any] = []
     for evidence in chain:
         if not evidence.source_segments:
             return False
@@ -280,9 +281,20 @@ def _source_backed_paragraph_merge_is_valid(
             if compute_text_sha256(segment.text) != segment.text_sha256:
                 return False
             authoritative_by_id[segment.segment_id] = segment
+            authoritative_segments.append(segment)
 
     final_by_id = {segment.segment_id: segment for segment in segments}
     if set(final_by_id) != set(authoritative_by_id):
+        return False
+    final_provenance = [
+        (segment.segment_id, segment.block_id, int(segment.page_idx))
+        for segment in segments
+    ]
+    authoritative_provenance = [
+        (segment.segment_id, segment.block_id, int(segment.page_idx))
+        for segment in authoritative_segments
+    ]
+    if final_provenance != authoritative_provenance:
         return False
     for segment_id, final_segment in final_by_id.items():
         authoritative = authoritative_by_id[segment_id]
