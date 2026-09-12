@@ -15,6 +15,7 @@ from book2epub.ir.models import (
     Heading,
     Paragraph,
     PreformattedBlock,
+    SourceRef,
     Table,
     Text,
 )
@@ -228,6 +229,43 @@ def test_apply_cross_page_continuation() -> None:
     assert isinstance(merged, Paragraph)
     assert "Sentence starts on page 1" in extract_block_visible_text(merged)
     assert "and continues on page 2." in extract_block_visible_text(merged)
+
+
+def test_apply_rejects_same_page_command_to_prose_continuation() -> None:
+    command = Paragraph(
+        id="cmd",
+        sources=[SourceRef(page_idx=12, source_type="text")],
+        inlines=[Text(text="ls /")],
+    )
+    prose = Paragraph(
+        id="prose",
+        sources=[SourceRef(page_idx=12, source_type="text")],
+        inlines=[Text(text="ルートディレクトリに格納されているファイルが表示される。")],
+    )
+    evidence_lookup = {
+        "cmd": _make_evidence("cmd", plain="ls /"),
+        "prose": _make_evidence(
+            "prose", plain="ルートディレクトリに格納されているファイルが表示される。"
+        ),
+    }
+    decision = ReconciledStructureDecision(
+        block_id="prose",
+        is_heading=None,
+        heading_level=None,
+        paragraph_continuation_of="cmd",
+        confidence=0.99,
+        evidence_codes=["CROSS_PAGE_SENTENCE_CONTINUITY"],
+    )
+
+    new_blocks, audits = apply_structure_decisions(
+        blocks=[command, prose],
+        decisions={"prose": decision},
+        evidence_lookup=evidence_lookup,
+    )
+
+    assert [block.id for block in new_blocks] == ["cmd", "prose"]
+    assert audits[0].status == "rejected_invalid_continuation"
+    assert "source page" in (audits[0].rejection_reason or "")
 
 
 def test_apply_hallucinated_table_target_rejected() -> None:

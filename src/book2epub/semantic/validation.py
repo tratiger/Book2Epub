@@ -12,8 +12,11 @@ across chunks, which would silently corrupt the BookIR.
 """
 
 import logging
+import re
 from collections import Counter
+from collections.abc import Mapping
 
+from book2epub.ir.models import Block, Paragraph, extract_inline_visible_text
 from book2epub.semantic.book_state import (
     BookStateObservationBatch,
     detect_numbering_family,
@@ -28,6 +31,57 @@ logger = logging.getLogger(__name__)
 
 class ScopeValidationError(ValueError):
     """Raised when a provider response references out-of-scope blocks or wrong chunk_id."""
+
+
+_SHELL_COMMAND_RE = re.compile(
+    r"^\s*(?:[$#>]\s+|(?:cd|ls|pwd|mkdir|rmdir|cp|mv|rm|chmod|chown|cat|grep|find|echo)\s+)"
+)
+
+
+def validate_structure_continuation(
+    prior_block: Block,
+    current_block: Block,
+    evidence_lookup: Mapping[str, object],
+) -> tuple[bool, str]:
+    """Validate a Pass-A paragraph continuation before mutating the IR.
+
+    Scope validation proves only identity.  This gate proves that the proposed
+    continuation is a source-page paragraph continuation rather than a shell
+    command followed by its explanatory prose.  Unknown page metadata is
+    tolerated for small synthetic/unit fixtures; real source blocks must cross
+    exactly one page boundary.
+    """
+    if not isinstance(prior_block, Paragraph) or not isinstance(current_block, Paragraph):
+        return False, "paragraph continuation requires two Paragraph blocks"
+
+    prior_pages = {source.page_idx for source in prior_block.sources}
+    current_pages = {source.page_idx for source in current_block.sources}
+    if prior_pages or current_pages:
+        if not prior_pages or not current_pages:
+            return False, "paragraph continuation requires page metadata on both blocks"
+        if max(prior_pages) + 1 != min(current_pages):
+            return False, "paragraph continuation must cross one adjacent source page"
+
+    def evidence_for(block: Block) -> object | None:
+        return evidence_lookup.get(block.id)
+
+    def visible_text(block: Paragraph) -> str:
+        return extract_inline_visible_text(block.inlines)
+
+    paragraphs: tuple[Paragraph, Paragraph] = (prior_block, current_block)
+    for block in paragraphs:
+        evidence = evidence_for(block)
+        flags = set(getattr(evidence, "flags", [])) if evidence is not None else set()
+        subtype = getattr(evidence, "current_subtype", None) if evidence is not None else None
+        text = visible_text(block)
+        if (
+            "TEXT_LOOKS_PREFORMATTED" in flags
+            or subtype in {"shell_command", "terminal_output", "terminal_session"}
+            or bool(_SHELL_COMMAND_RE.match(text))
+        ):
+            return False, f"block '{block.id}' is command/preformatted-like, not prose"
+
+    return True, ""
 
 
 def _chunk_block_ids(chunk: SemanticChunkInput) -> frozenset[str]:

@@ -41,6 +41,7 @@ from book2epub.semantic.relations import (
     deterministic_wrapper_id,
     validate_relation,
 )
+from book2epub.semantic.validation import validate_structure_continuation
 
 logger = logging.getLogger(__name__)
 
@@ -218,36 +219,60 @@ def apply_structure_decisions(
             prior_id = dec.paragraph_continuation_of
             prior_blk = new_blocks[-1]
             if prior_blk.id == prior_id and isinstance(prior_blk, Paragraph):
-                # Build merged paragraph WITHOUT in-place mutation of prior_blk.
-                # Construct new combined inlines and sources lists.
-                page_boundary = PageBoundary(
-                    page_idx=blk.sources[0].page_idx if blk.sources else 0
+                continuation_ok, continuation_reason = validate_structure_continuation(
+                    prior_blk,
+                    blk,
+                    evidence_lookup,
                 )
-                merged_inlines = list(prior_blk.inlines) + [page_boundary] + list(blk.inlines)
-                merged_sources = list(prior_blk.sources) + list(blk.sources)
-                merged_para = prior_blk.model_copy(
-                    update={"inlines": merged_inlines, "sources": merged_sources}
-                )
-                # Replace the last element in new_blocks with the merged paragraph
-                new_blocks[-1] = merged_para
-
-                audits.append(
-                    SemanticAuditRecord(
-                        decision_id=f"pass-a-cont-{blk.id}",
-                        block_id=blk.id,
-                        source_kind=source_kind,
-                        proposed_target="paragraph_continuation",
-                        final_target="merged_continuation",
-                        confidence=dec.confidence,
-                        evidence_codes=dec.evidence_codes,
-                        provider="structure",
-                        model="structure",
-                        request_ids=dec.chunk_ids,
-                        status="applied",
-                        source_content_sha256=hash_before,
+                if not continuation_ok:
+                    audits.append(
+                        SemanticAuditRecord(
+                            decision_id=f"pass-a-cont-{blk.id}",
+                            block_id=blk.id,
+                            source_kind=source_kind,
+                            proposed_target="paragraph_continuation",
+                            final_target=source_kind,
+                            confidence=dec.confidence,
+                            evidence_codes=dec.evidence_codes,
+                            provider="structure",
+                            model="structure",
+                            request_ids=dec.chunk_ids,
+                            status="rejected_invalid_continuation",
+                            rejection_reason=continuation_reason,
+                            source_content_sha256=hash_before,
+                        )
                     )
-                )
-                continue
+                else:
+                    # Build merged paragraph WITHOUT in-place mutation of prior_blk.
+                    # Construct new combined inlines and sources lists.
+                    page_boundary = PageBoundary(
+                        page_idx=blk.sources[0].page_idx if blk.sources else 0
+                    )
+                    merged_inlines = list(prior_blk.inlines) + [page_boundary] + list(blk.inlines)
+                    merged_sources = list(prior_blk.sources) + list(blk.sources)
+                    merged_para = prior_blk.model_copy(
+                        update={"inlines": merged_inlines, "sources": merged_sources}
+                    )
+                    # Replace the last element in new_blocks with the merged paragraph
+                    new_blocks[-1] = merged_para
+
+                    audits.append(
+                        SemanticAuditRecord(
+                            decision_id=f"pass-a-cont-{blk.id}",
+                            block_id=blk.id,
+                            source_kind=source_kind,
+                            proposed_target="paragraph_continuation",
+                            final_target="merged_continuation",
+                            confidence=dec.confidence,
+                            evidence_codes=dec.evidence_codes,
+                            provider="structure",
+                            model="structure",
+                            request_ids=dec.chunk_ids,
+                            status="applied",
+                            source_content_sha256=hash_before,
+                        )
+                    )
+                    continue
 
         # Handle heading promotion / demotion / level setting
         if dec.is_heading is True and dec.heading_level is not None:

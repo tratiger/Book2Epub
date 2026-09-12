@@ -215,6 +215,7 @@ class SemanticAuditRecord(BaseModel):
         "preserved_original_low_confidence",
         "preserved_original_conflict",
         "rejected_invalid_target",
+        "rejected_invalid_continuation",
         "rejected_hash_mismatch",
         "queued_visual_review",
         "visual_override_applied",

@@ -29,6 +29,7 @@ from book2epub.ir.models import (
     Table,
     Text,
     UnknownBlock,
+    extract_inline_source_segments,
     extract_inline_visible_text,
 )
 from book2epub.qa.models import (
@@ -214,6 +215,57 @@ def compute_final_block_hashes(block: Block) -> tuple[str, str]:
         footnote_text=footnote_text,
     )
     return canonical_text, content_hash
+
+
+def _source_backed_paragraph_merge_is_valid(
+    source_evidence: Any,
+    final_block: Block,
+    evidence_lookup: dict[str, Any],
+) -> bool:
+    """Accept only an auditable, source-backed paragraph merge.
+
+    A merged paragraph keeps the first block ID, so comparing its complete final
+    text with the first evidence block is intentionally insufficient.  This
+    helper does not accept arbitrary extra text: every extra source block must be
+    represented by inline provenance and must be an adjacent cross-page source
+    block from the authoritative evidence baseline.  The audit is useful for
+    provenance, but cannot make a same-page merge acceptable after the fact.
+    """
+    if not isinstance(final_block, Paragraph):
+        return False
+
+    segments = extract_inline_source_segments(final_block.inlines)
+    source_ids = {segment.block_id for segment in segments if segment.block_id}
+    if source_evidence.block_id not in source_ids:
+        return False
+
+    extra_ids = source_ids - {source_evidence.block_id}
+    if not extra_ids:
+        return False
+
+    for extra_id in extra_ids:
+        extra_evidence = evidence_lookup.get(extra_id)
+        if extra_evidence is None:
+            return False
+        if abs(int(source_evidence.page_idx) - int(extra_evidence.page_idx)) != 1:
+            return False
+
+
+    # Text nodes in this path must all retain segment provenance.  This prevents
+    # the QA exception from becoming a general allowance for generated prose.
+    for inline in final_block.inlines:
+        if isinstance(inline, Text) and inline.text and not inline.source_segments:
+            return False
+    return True
+
+
+def _expected_preformatted_body(source_evidence: Any) -> str:
+    """Return code/preformatted body text without a separately stored caption."""
+    candidate = source_evidence.preformatted_text or source_evidence.plain_text or ""
+    caption = source_evidence.caption_text or ""
+    if caption and candidate.startswith(caption):
+        return candidate[len(caption) :].lstrip("\r\n")
+    return candidate
 
 
 def flatten_ir_blocks(
@@ -402,18 +454,32 @@ def build_preservation_ledger(
                         or final_kind in ("code", "preformatted")
                     )
                     if is_code_like:
-                        norm_exp = expected_text.replace("\r\n", "\n")
+                        # Code/preformatted captions are stored separately on the
+                        # final IR node.  Compare the body with the body evidence,
+                        # while caption preservation is checked independently.
+                        body_expected = _expected_preformatted_body(ev)
+                        norm_exp = body_expected.replace("\r\n", "\n")
                         norm_fin = final_text.replace("\r\n", "\n")
                         if norm_exp != norm_fin:
                             reason = (
                                 f"Text mismatch in same-representation block: "
-                                f"source '{expected_text[:30]}' != final '{final_text[:30]}'"
+                                f"source '{body_expected[:30]}' != final '{final_text[:30]}'"
                             )
                     else:
                         if expected_text and compute_text_sha256(final_text) != compute_text_sha256(
                             expected_text
                         ):
-                            if not is_acceptable_text_preservation(expected_text, final_text):
+                            source_backed_merge = (
+                                ev.source_type in ("text", "paragraph")
+                                and _source_backed_paragraph_merge_is_valid(
+                                    ev,
+                                    final_block,
+                                    {item.block_id: item for item in evidence.blocks},
+                                )
+                            )
+                            if not is_acceptable_text_preservation(
+                                expected_text, final_text
+                            ) and not source_backed_merge:
                                 reason = (
                                     f"Text mismatch in same-representation block: "
                                     f"source '{expected_text[:30]}' != final '{final_text[:30]}'"
