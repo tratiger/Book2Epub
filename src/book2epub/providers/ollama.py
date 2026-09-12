@@ -150,6 +150,25 @@ class OllamaProvider:
                 else "structured_output_schema_mismatch"
             )
 
+        def log_structured_output_failure(details: dict[str, Any]) -> None:
+            """Log bounded response metadata without logging source/provider text."""
+            prefix = (
+                "Ollama truncation"
+                if details.get("error_type") == "structured_output_truncated"
+                else "Ollama structured output failure"
+            )
+            logger.error(
+                "%s: error_type=%s request_id=%s done_reason=%s "
+                "prompt_tokens=%s output_tokens=%s response_chars=%s",
+                prefix,
+                details.get("error_type"),
+                details.get("request_id"),
+                details.get("done_reason"),
+                details.get("prompt_eval_count"),
+                details.get("eval_count"),
+                details.get("raw_response_chars"),
+            )
+
         # Validate with Pydantic locally (Section 4 rule 3)
         try:
             parsed_json = json.loads(raw_text)
@@ -157,6 +176,7 @@ class OllamaProvider:
         except Exception as first_val_err:
             if is_truncation(resp):
                 details = failure_details(resp, "structured_output_truncated")
+                log_structured_output_failure(details)
                 raise ProviderError(
                     "Ollama structured output was truncated; same-request schema retry "
                     "was skipped",
@@ -194,6 +214,7 @@ class OllamaProvider:
                 )
                 details = failure_details(final_response, final_type)
                 details["request_id"] = retry_req_id
+                log_structured_output_failure(details)
                 raise ProviderError(
                     f"Ollama response failed local Pydantic schema validation: {final_val_err}",
                     details=details,

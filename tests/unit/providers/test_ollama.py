@@ -147,7 +147,9 @@ def test_ollama_infer_transient_retry(mock_init: MagicMock) -> None:
 
 
 @patch("book2epub.providers.ollama.OllamaProvider.__init__", return_value=None)
-def test_ollama_length_truncation_skips_schema_retry(mock_init: MagicMock) -> None:
+def test_ollama_length_truncation_skips_schema_retry(
+    mock_init: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
     provider = OllamaProvider(model="qwen3-vl:8b-instruct")
     provider.model = "qwen3-vl:8b-instruct"
     provider.name = "ollama"
@@ -175,6 +177,12 @@ def test_ollama_length_truncation_skips_schema_retry(mock_init: MagicMock) -> No
     assert exc_info.value.details["prompt_eval_count"] == 321
     assert exc_info.value.details["eval_count"] == 4096
     assert exc_info.value.details["raw_response_chars"] > 0
+    assert "Ollama truncation" in caplog.text
+    assert "error_type=structured_output_truncated" in caplog.text
+    assert "request_id=req-length" in caplog.text
+    assert "done_reason=length" in caplog.text
+    assert "prompt_tokens=321" in caplog.text
+    assert "output_tokens=4096" in caplog.text
 
 
 @patch("book2epub.providers.ollama.OllamaProvider.__init__", return_value=None)
