@@ -55,6 +55,14 @@ def test_pass_b_schema_bounds_decisions_relations_and_observations() -> None:
     assert properties["decisions"]["maxItems"] == 20
     assert properties["relations"]["maxItems"] == 40
     assert properties["observations"]["maxItems"] == 1
+    assert (
+        _definition(schema, "SemanticBlockDecision")["properties"]["evidence_codes"]["maxItems"]
+        == 8
+    )
+    assert (
+        _definition(schema, "SemanticRelationDecision")["properties"]["evidence_codes"]["maxItems"]
+        == 8
+    )
     relation = _definition(schema, "SemanticRelationDecision")
     assert relation["properties"]["source_block_ids"]["items"]["enum"] == ids
     assert relation["properties"]["source_block_ids"]["maxItems"] == 20
@@ -102,8 +110,9 @@ def test_ollama_schema_keeps_nullable_fields_optional_but_openai_contract_stays_
 
 def test_semantic_output_budget_is_bounded_and_scales_with_scope() -> None:
     assert semantic_output_token_budget(1, "pass_a") < semantic_output_token_budget(20, "pass_b")
-    assert semantic_output_token_budget(20, "pass_b") == 8192
-    assert semantic_output_token_budget(1000, "pass_b") == 8192
+    assert semantic_output_token_budget(17, "pass_b") == 16384
+    assert semantic_output_token_budget(20, "pass_b") == 16384
+    assert semantic_output_token_budget(1000, "pass_b") == 16384
 
 
 def test_twenty_block_realistic_worst_case_fits_pass_b_budget() -> None:
@@ -156,8 +165,18 @@ def test_twenty_block_realistic_worst_case_fits_pass_b_budget() -> None:
             }
         ],
     }
+    # Live qwen3-vl measurement: 20,038 response chars / 7,120 eval tokens
+    # ~= 2.81 chars/token.  Use that observed ratio rather than an optimistic
+    # generic 4-char/token estimate for this JSON-heavy response.
     estimated_tokens = ceil(
-        len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) / 4
+        len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))) / 2.81
     )
 
-    assert estimated_tokens < semantic_output_token_budget(20, "pass_b")
+    budget = semantic_output_token_budget(20, "pass_b")
+    assert estimated_tokens < budget
+
+    # The live 17-block failure measured 10,435 prompt tokens.  Scale that
+    # observed request shape to 20 blocks and verify the configured output cap
+    # still leaves headroom inside the explicit 32K Ollama context target.
+    estimated_prompt_tokens = ceil(10_435 * 20 / 17)
+    assert estimated_prompt_tokens + budget < 32_768

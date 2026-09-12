@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from book2epub.semantic.schemas import adapt_provider_schema, build_provider_schema
 
-REQUEST_SCOPED_SCHEMA_CONTRACT_VERSION = "1.1"
+REQUEST_SCOPED_SCHEMA_CONTRACT_VERSION = "1.2"
 
 
 def _set_string_scope(schema: dict[str, Any], allowed_ids: list[str]) -> None:
@@ -131,6 +131,11 @@ def build_request_scoped_schema(
         }
         for property_name, maximum in observation_limits.items():
             _set_property_max_items(schema, property_name, maximum)
+        _set_property_max_items(schema, "textual_cues", 8)
+
+    # Repeated evidence codes were the dominant source of live output
+    # explosion.  Evidence is a bounded reason-code set, not free-form text.
+    _set_property_max_items(schema, "evidence_codes", 8)
 
     return adapt_provider_schema(schema, provider)
 
@@ -139,7 +144,11 @@ def semantic_output_token_budget(block_count: int, pass_name: str) -> int:
     """Bound output independently of the provider's context setting."""
     # The budget is based on the bounded response shape, not the input context.
     # Pass B needs room for decisions, up to two relations per block, and one
-    # bounded observation object.  8192 tokens remains well below a 32K local
-    # context after the documented 8K-character input target and prompt.
-    per_block = 240 if pass_name == "pass_a" else 400
-    return min(8192, max(1536, 320 + max(1, block_count) * per_block))
+    # bounded observation object.  The initial 640-token slope was still
+    # insufficient for a live 17-block response, which reached the resulting
+    # 14,080-token limit.  Use a larger per-block allowance while separately
+    # bounding repeated evidence codes.  The 16,384 cap keeps a 20-block
+    # request below a 32K context with the measured ~10K-token prompt.
+    if pass_name == "pass_a":
+        return min(8192, max(1536, 320 + max(1, block_count) * 240))
+    return min(16_384, max(2048, 1024 + max(1, block_count) * 1024))

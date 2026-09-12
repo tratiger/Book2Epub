@@ -2,6 +2,7 @@
 
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -148,7 +149,7 @@ def test_ollama_infer_transient_retry(mock_init: MagicMock) -> None:
 
 @patch("book2epub.providers.ollama.OllamaProvider.__init__", return_value=None)
 def test_ollama_length_truncation_skips_schema_retry(
-    mock_init: MagicMock, caplog: pytest.LogCaptureFixture
+    mock_init: MagicMock, caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     provider = OllamaProvider(model="qwen3-vl:8b-instruct")
     provider.model = "qwen3-vl:8b-instruct"
@@ -166,6 +167,7 @@ def test_ollama_length_truncation_skips_schema_retry(
         user_text="user",
         response_model_name="SampleResponse",
         response_schema=build_provider_schema(SampleResponse),
+        debug_artifact_path=tmp_path / "ollama-truncation.json",
     )
 
     with pytest.raises(ProviderError) as exc_info:
@@ -183,6 +185,11 @@ def test_ollama_length_truncation_skips_schema_retry(
     assert "done_reason=length" in caplog.text
     assert "prompt_tokens=321" in caplog.text
     assert "output_tokens=4096" in caplog.text
+    debug_artifact = tmp_path / "ollama-truncation.json"
+    assert debug_artifact.is_file()
+    artifact = json.loads(debug_artifact.read_text(encoding="utf-8"))
+    assert artifact["error_type"] == "structured_output_truncated"
+    assert artifact["raw_text"] == '{"status":"incomplete"'
 
 
 @patch("book2epub.providers.ollama.OllamaProvider.__init__", return_value=None)

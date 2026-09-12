@@ -25,6 +25,7 @@ class StructuredInferenceRequest(BaseModel):
     images: list[ImageInput] = Field(default_factory=list)
     max_output_tokens: int = 8192
     reasoning_effort: Literal["low", "medium", "high"] = "high"
+    debug_artifact_path: Path | None = None
 
 
 class ProviderUsage(BaseModel):

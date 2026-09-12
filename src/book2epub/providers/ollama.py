@@ -169,6 +169,37 @@ class OllamaProvider:
                 details.get("raw_response_chars"),
             )
 
+        def save_debug_artifact(response: Any, details: dict[str, Any]) -> None:
+            """Persist an explicit truncation artifact without logging raw output."""
+            if request.debug_artifact_path is None:
+                return
+            try:
+                request.debug_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                request.debug_artifact_path.write_text(
+                    json.dumps(
+                        {
+                            "error_type": details.get("error_type"),
+                            "provider": self.name,
+                            "model": self.model,
+                            "request_id": details.get("request_id"),
+                            "done_reason": details.get("done_reason"),
+                            "prompt_eval_count": details.get("prompt_eval_count"),
+                            "eval_count": details.get("eval_count"),
+                            "raw_response_chars": details.get("raw_response_chars"),
+                            "raw_text": extract_content(response),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except OSError as exc:
+                logger.warning(
+                    "Could not save Ollama structured-output debug artifact path=%s: %s",
+                    request.debug_artifact_path,
+                    exc,
+                )
+
         # Validate with Pydantic locally (Section 4 rule 3)
         try:
             parsed_json = json.loads(raw_text)
@@ -177,6 +208,7 @@ class OllamaProvider:
             if is_truncation(resp):
                 details = failure_details(resp, "structured_output_truncated")
                 log_structured_output_failure(details)
+                save_debug_artifact(resp, details)
                 raise ProviderError(
                     "Ollama structured output was truncated; same-request schema retry "
                     "was skipped",
@@ -215,6 +247,8 @@ class OllamaProvider:
                 details = failure_details(final_response, final_type)
                 details["request_id"] = retry_req_id
                 log_structured_output_failure(details)
+                if final_type == "structured_output_truncated":
+                    save_debug_artifact(final_response, details)
                 raise ProviderError(
                     f"Ollama response failed local Pydantic schema validation: {final_val_err}",
                     details=details,

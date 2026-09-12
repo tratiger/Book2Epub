@@ -465,6 +465,11 @@ def run_semantic_reconstruction(
                 pass_name="pass_a",
             ),
             max_output_tokens=semantic_output_token_budget(len(chunk.block_ids), "pass_a"),
+            debug_artifact_path=(
+                paths.semantic_dir
+                / "provider-debug"
+                / f"{chunk.chunk_id}-pass-a.truncated.json"
+            ),
         )
 
         batch_obj, inf_res = provider.infer(req, StructureDecisionBatch)
@@ -607,6 +612,11 @@ def run_semantic_reconstruction(
                 pass_name="pass_b",
             ),
             max_output_tokens=semantic_output_token_budget(len(chunk.block_ids), "pass_b"),
+            debug_artifact_path=(
+                paths.semantic_dir
+                / "provider-debug"
+                / f"{chunk.chunk_id}-pass-b.truncated.json"
+            ),
         )
 
         batch_b, inf_b = provider.infer(req, SemanticDecisionBatch)
