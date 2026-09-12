@@ -121,16 +121,20 @@ def test_preservation_accepts_audited_source_backed_paragraph_merge() -> None:
         blocks=[
             SemanticEvidenceBlock(
                 block_id="p1",
+                order_index=0,
                 page_idx=0,
                 source_type="text",
                 plain_text="first",
+                source_segments=[seg1],
                 content_sha256=compute_content_sha256(plain_text="first"),
             ),
             SemanticEvidenceBlock(
                 block_id="p2",
+                order_index=1,
                 page_idx=1,
                 source_type="text",
                 plain_text="second",
+                source_segments=[seg2],
                 content_sha256=compute_content_sha256(plain_text="second"),
             ),
         ],
@@ -174,6 +178,128 @@ def test_preservation_accepts_audited_source_backed_paragraph_merge() -> None:
     )
     same_page_entry = next(item for item in same_page_ledger if item.source_block_id == "p1")
     assert "Text mismatch" in (same_page_entry.reason or "")
+
+
+def test_preservation_accepts_audited_source_backed_three_page_merge() -> None:
+    segments = [
+        SourceTextSegment(
+            segment_id=f"p{i}-s1",
+            page_idx=i - 1,
+            block_id=f"p{i}",
+            text=f"part {i}",
+            text_sha256=compute_text_sha256(f"part {i}"),
+        )
+        for i in range(1, 4)
+    ]
+    evidence = SemanticEvidenceBook(
+        source_middle_sha256="m",
+        raw_bookir_sha256="r",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id=f"p{i}",
+                order_index=i - 1,
+                page_idx=i - 1,
+                source_type="text",
+                plain_text=f"part {i}",
+                source_segments=[segments[i - 1]],
+            )
+            for i in range(1, 4)
+        ],
+    )
+    merged = Paragraph(
+        id="p1",
+        inlines=[
+            Text(text="part 1", source_segments=[segments[0]]),
+            PageBoundary(page_idx=1),
+            Text(text="part 2", source_segments=[segments[1]]),
+            PageBoundary(page_idx=2),
+            Text(text="part 3", source_segments=[segments[2]]),
+        ],
+    )
+    audit = SemanticAuditRecord(
+        decision_id="pass-a-cont-p2-p3",
+        block_id="p2",
+        source_kind="paragraph",
+        proposed_target="paragraph_continuation",
+        final_target="merged_continuation",
+        confidence=0.95,
+        provider="structure",
+        model="structure",
+        status="applied",
+    )
+
+    ledger = build_preservation_ledger(
+        evidence,
+        BookIR(source=SourceDocument(page_count=3), blocks=[merged]),
+        audits=[audit],
+    )
+
+    entry = next(item for item in ledger if item.source_block_id == "p1")
+    assert "Text mismatch" not in (entry.reason or "")
+
+
+def test_preservation_rejects_source_backed_merge_with_modified_segment_text() -> None:
+    seg1 = SourceTextSegment(
+        segment_id="p1-s1",
+        page_idx=0,
+        block_id="p1",
+        text="first",
+        text_sha256=compute_text_sha256("first"),
+    )
+    seg2 = SourceTextSegment(
+        segment_id="p2-s1",
+        page_idx=1,
+        block_id="p2",
+        text="second",
+        text_sha256=compute_text_sha256("second"),
+    )
+    evidence = SemanticEvidenceBook(
+        source_middle_sha256="m",
+        raw_bookir_sha256="r",
+        blocks=[
+            SemanticEvidenceBlock(
+                block_id="p1",
+                order_index=0,
+                page_idx=0,
+                source_type="text",
+                plain_text="first",
+                source_segments=[seg1],
+            ),
+            SemanticEvidenceBlock(
+                block_id="p2",
+                order_index=1,
+                page_idx=1,
+                source_type="text",
+                plain_text="second",
+                source_segments=[seg2],
+            ),
+        ],
+    )
+    tampered = Paragraph(
+        id="p1",
+        inlines=[
+            Text(text="first", source_segments=[seg1]),
+            PageBoundary(page_idx=1),
+            Text(
+                text="changed",
+                source_segments=[
+                    seg2.model_copy(
+                        update={
+                            "text": "changed",
+                            "text_sha256": compute_text_sha256("changed"),
+                        }
+                    )
+                ],
+            ),
+        ],
+    )
+    ledger = build_preservation_ledger(
+        evidence,
+        BookIR(source=SourceDocument(page_count=2), blocks=[tampered]),
+    )
+
+    entry = next(item for item in ledger if item.source_block_id == "p1")
+    assert "Text mismatch" in (entry.reason or "")
 
 
 def test_preservation_compares_code_body_separately_from_caption() -> None:

@@ -226,30 +226,74 @@ def _source_backed_paragraph_merge_is_valid(
 
     A merged paragraph keeps the first block ID, so comparing its complete final
     text with the first evidence block is intentionally insufficient.  This
-    helper does not accept arbitrary extra text: every extra source block must be
-    represented by inline provenance and must be an adjacent cross-page source
-    block from the authoritative evidence baseline.  The audit is useful for
-    provenance, but cannot make a same-page merge acceptable after the fact.
+    helper does not accept arbitrary extra text: every source segment in the final
+    paragraph must exactly match an authoritative evidence segment, and the
+    represented source blocks must form a source-order, adjacent-page chain.  The
+    audit is useful for provenance, but cannot make a same-page merge or modified
+    text acceptable after the fact.
     """
     if not isinstance(final_block, Paragraph):
         return False
 
     segments = extract_inline_source_segments(final_block.inlines)
-    source_ids = {segment.block_id for segment in segments if segment.block_id}
-    if source_evidence.block_id not in source_ids:
+    if not segments or any(not segment.block_id for segment in segments):
         return False
 
-    extra_ids = source_ids - {source_evidence.block_id}
-    if not extra_ids:
+    segment_ids = [segment.segment_id for segment in segments]
+    if len(segment_ids) != len(set(segment_ids)):
         return False
 
-    for extra_id in extra_ids:
-        extra_evidence = evidence_lookup.get(extra_id)
-        if extra_evidence is None:
-            return False
-        if abs(int(source_evidence.page_idx) - int(extra_evidence.page_idx)) != 1:
-            return False
+    # The final inline provenance determines the source-order chain.  Do not
+    # compare every block to the first page: a valid continuation may span many
+    # pages, but each hop must be exactly one page forward.
+    source_ids = list(dict.fromkeys(segment.block_id for segment in segments))
+    if source_ids[0] != source_evidence.block_id or len(source_ids) < 2:
+        return False
 
+    chain = []
+    for block_id in source_ids:
+        evidence = evidence_lookup.get(block_id)
+        if evidence is None:
+            return False
+        chain.append(evidence)
+
+    if any(
+        int(current.page_idx) != int(previous.page_idx) + 1
+        for previous, current in zip(chain, chain[1:])
+    ):
+        return False
+    if any(
+        int(current.order_index) <= int(previous.order_index)
+        for previous, current in zip(chain, chain[1:])
+    ):
+        return False
+
+    # Every source block in the chain must expose authoritative segments.  A
+    # correct block_id alone is not enough to excuse generated or altered text.
+    authoritative_by_id: dict[str, Any] = {}
+    for evidence in chain:
+        if not evidence.source_segments:
+            return False
+        for segment in evidence.source_segments:
+            if segment.segment_id in authoritative_by_id:
+                return False
+            if compute_text_sha256(segment.text) != segment.text_sha256:
+                return False
+            authoritative_by_id[segment.segment_id] = segment
+
+    final_by_id = {segment.segment_id: segment for segment in segments}
+    if set(final_by_id) != set(authoritative_by_id):
+        return False
+    for segment_id, final_segment in final_by_id.items():
+        authoritative = authoritative_by_id[segment_id]
+        if (
+            final_segment.block_id != authoritative.block_id
+            or int(final_segment.page_idx) != int(authoritative.page_idx)
+            or final_segment.text != authoritative.text
+            or final_segment.text_sha256 != authoritative.text_sha256
+            or compute_text_sha256(final_segment.text) != final_segment.text_sha256
+        ):
+            return False
 
     # Text nodes in this path must all retain segment provenance.  This prevents
     # the QA exception from becoming a general allowance for generated prose.
